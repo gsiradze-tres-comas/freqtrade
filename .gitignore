@@ -1,17 +1,32 @@
-# Freqtrade rules
+# Freqtrade rules - Modified for custom fork
 config*.json
+!user_data/configs/  # INCLUDE custom configs in git
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
 logfile.txt
-user_data/*
+
+# User data - exclude specific folders we don't want
+user_data/logs/
+user_data/backtest_results/
+user_data/data/
+user_data/hyperopts/
+user_data/notebooks/
+user_data/freqaimodels/
+user_data/models/
+user_data/*.sqlite*
+
+# Include our working strategy (exclude others)
+user_data/strategies/*.py
+!user_data/strategies/Try1BullRiderStrategy.py
+
+# Include our essential configs only
+user_data/configs/*.json
+!user_data/configs/config_billionaire.json     # Only the working config
+!user_data/configs/config_hft_optimized.json   # Backup config
+
+# Keep original example
 !user_data/strategy/sample_strategy.py
-!user_data/notebooks
-!user_data/models
-!user_data/freqaimodels
-user_data/freqaimodels/*
-user_data/models/*
-user_data/notebooks/*
 freqtrade-plot.html
 freqtrade-profit-plot.html
 freqtrade/rpc/api_server/ui/*
@@ -116,3 +131,16 @@ target/
 !config_examples/config_freqai.example.json
 
 docker-compose-*.yml
+
+# Custom additions - files to exclude
+paper_trading.log
+logs/
+mcp-servers/      # External dependency, shouldn't be in our git
+mcp_servers.json
+mcp_servers.json.env
+
+# Include important custom files (override previous exclusions)
+!scripts/         # INCLUDE our custom scripts
+!.env.example     # INCLUDE example env file
+!CLAUDE.md        # INCLUDE our project documentation
+!TRADING_SAFETY_DISABLED.md  # INCLUDE safety documentation

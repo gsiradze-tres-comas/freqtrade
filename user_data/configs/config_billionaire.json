@@ -1,0 +1,136 @@
+{
+    "max_open_trades": 15,
+    "stake_currency": "USDT",
+    "stake_amount": "unlimited",
+    "tradable_balance_ratio": 0.99,
+    "fiat_display_currency": "USD",
+    "timeframe": "5m",
+    "dry_run": true,
+    "_SAFETY_LOCK": "DO NOT CHANGE dry_run to false - REAL TRADING DISABLED FOR SAFETY",
+    "dry_run_wallet": 10000,
+    "cancel_open_orders_on_exit": false,
+    "enable_fast_orders": false,
+    "order_pool_size": 20,
+    "circuit_breaker_enabled": true,
+    "circuit_breaker_max_failures": 10,
+    "circuit_breaker_window": 60,
+    "use_order_ws": true,
+    "enable_order_presigning": true,
+    "trading_mode": "futures",
+    "margin_mode": "isolated",
+    "unfilledtimeout": {
+        "entry": 5,
+        "exit": 5,
+        "exit_timeout_count": 0,
+        "unit": "seconds"
+    },
+    "entry_pricing": {
+        "price_side": "same",
+        "use_order_book": true,
+        "order_book_top": 1,
+        "price_last_balance": 0.0,
+        "check_depth_of_market": {
+            "enabled": false,
+            "bids_to_ask_delta": 1
+        }
+    },
+    "exit_pricing": {
+        "price_side": "other",
+        "use_order_book": true,
+        "order_book_top": 1
+    },
+    "exchange": {
+        "name": "binance",
+        "key": "",
+        "secret": "",
+        "proxy": "",
+        "proxy_coin": "USDT",
+        "ccxt_config": {
+            "enableRateLimit": true,
+            "rateLimit": 50,
+            "options": {
+                "defaultType": "future",
+                "recvWindow": 5000,
+                "timeSynchronization": {
+                    "enabled": true,
+                    "adjustForTimeDifference": true
+                }
+            }
+        },
+        "ccxt_async_config": {
+            "enableRateLimit": true,
+            "rateLimit": 50
+        },
+        "pair_whitelist": [
+            "BTC/USDT:USDT",
+            "ETH/USDT:USDT",
+            "DOGE/USDT:USDT",
+            "ADA/USDT:USDT",
+            "XRP/USDT:USDT",
+            "SOL/USDT:USDT",
+            "AVAX/USDT:USDT",
+            "LINK/USDT:USDT",
+            "BNB/USDT:USDT",
+            "BCH/USDT:USDT",
+            "TIA/USDT:USDT",
+            "DOT/USDT:USDT",
+            "UNI/USDT:USDT",
+            "1INCH/USDT:USDT",
+            "XMR/USDT:USDT"
+        ],
+        "pair_blacklist": [
+        ]
+    },
+    "pairlists": [
+        {
+            "method": "StaticPairList"
+        }
+    ],
+    "leverage_mode": "cross",
+    "liquidation_buffer": 0.05,
+    "edge": {
+        "enabled": false,
+        "process_throttle_secs": 3600,
+        "calculate_since_number_of_days": 7,
+        "allowed_risk": 0.01,
+        "stoploss_range_min": -0.01,
+        "stoploss_range_max": -0.1,
+        "stoploss_range_step": -0.01,
+        "minimum_winrate": 0.60,
+        "minimum_expectancy": 0.20,
+        "min_trade_number": 10,
+        "max_trade_duration_minute": 1440,
+        "remove_pumps": false
+    },
+    "telegram": {
+        "enabled": false,
+        "token": "your_telegram_token",
+        "chat_id": "your_telegram_chat_id"
+    },
+    "webhook": {
+        "enabled": false
+    },
+    "api_server": {
+        "enabled": true,
+        "listen_ip_address": "127.0.0.1",
+        "listen_port": 8080,
+        "verbosity": "error",
+        "enable_openapi": false,
+        "jwt_secret_key": "c2a24fa7dc8d7ad0f60d02c00f9fbbfff8b2e1e9e35f8e3c8e8f8e1e1e1e1e1e",
+        "CORS_origins": [],
+        "username": "freqtrade",
+        "password": "freqtrade"
+    },
+    "bot_name": "freqtrade_hft",
+    "initial_state": "running",
+    "force_entry_enable": false,
+    "internals": {
+        "process_throttle_secs": 1,
+        "heartbeat_interval": 60
+    },
+    "strategy": "Try1BullRiderStrategy",
+    "db_url": "postgresql://postgres:postgres@127.0.0.1:5433/freqtrade_db",
+    "logfile": "user_data/logs/freqtrade_hft.log",
+    "dataformat_ohlcv": "feather",
+    "dataformat_trades": "feather"
+}

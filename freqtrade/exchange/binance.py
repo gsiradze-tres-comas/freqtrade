@@ -1,13 +1,15 @@
 """Binance exchange subclass"""
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 import ccxt
 from pandas import DataFrame
 
-from freqtrade.constants import DEFAULT_DATAFRAME_COLUMNS
+from freqtrade.constants import DEFAULT_DATAFRAME_COLUMNS, BuySell
 from freqtrade.enums import CandleType, MarginMode, PriceType, TradingMode
 from freqtrade.exceptions import DDosProtection, OperationalException, TemporaryError
 from freqtrade.exchange import Exchange
@@ -19,7 +21,9 @@ from freqtrade.exchange.binance_public_data import (
 from freqtrade.exchange.common import retrier
 from freqtrade.exchange.exchange_types import FtHas, Tickers
 from freqtrade.exchange.exchange_utils_timeframe import timeframe_to_msecs
+from freqtrade.exchange.fast_order_manager import FastOrder, FastOrderManager, OrderPriority
 from freqtrade.misc import deep_merge_dicts, json_load
+from freqtrade.performance import monitor_latency
 from freqtrade.util.datetime_helpers import dt_from_ts, dt_ts
 
 
@@ -41,6 +45,18 @@ class Binance(Exchange):
         "l2_limit_range": [5, 10, 20, 50, 100, 500, 1000],
         "ws_enabled": True,
     }
+    
+    def __init__(self, config: Dict[str, Any], *, exchange_config: Optional[Dict[str, Any]] = None, 
+                 validate: bool = True, load_leverage_tiers: bool = False) -> None:
+        super().__init__(config, exchange_config=exchange_config, validate=validate, 
+                        load_leverage_tiers=load_leverage_tiers)
+        
+        # Initialize fast order manager if enabled
+        self.fast_order_manager: Optional[FastOrderManager] = None
+        if config.get('enable_fast_orders', False):
+            logger.info("Initializing FastOrderManager for Binance")
+            self.fast_order_manager = FastOrderManager(self, config)
+    
     _ft_has_futures: FtHas = {
         "funding_fee_candle_limit": 1000,
         "stoploss_order_types": {"limit": "stop", "market": "stop_market"},
@@ -81,6 +97,87 @@ class Binance(Exchange):
                 self._config["stake_currency"],
             )  # type: ignore[return-value]
         return self._config["stake_currency"]
+    
+    async def initialize_fast_orders(self) -> None:
+        """Initialize the fast order manager"""
+        if self.fast_order_manager:
+            await self.fast_order_manager.initialize()
+            logger.info("FastOrderManager initialized successfully")
+    
+    async def shutdown_fast_orders(self) -> None:
+        """Shutdown the fast order manager"""
+        if self.fast_order_manager:
+            await self.fast_order_manager.shutdown()
+            logger.info("FastOrderManager shut down")
+    
+    @monitor_latency('order_create')
+    def create_order(
+        self,
+        *,
+        pair: str,
+        ordertype: str,
+        side: BuySell,
+        amount: float,
+        rate: float = None,
+        leverage: float = None,
+        reduceOnly: bool = False,
+        time_in_force: str = 'GTC',
+        params: Dict = None,
+    ) -> Dict[str, Any]:
+        """
+        Create order with optional fast execution
+        """
+        # Use fast order manager if enabled and appropriate
+        if (self.fast_order_manager and 
+            self._config.get('enable_fast_orders', False) and
+            ordertype in ['market', 'limit']):
+            
+            # Determine priority based on order type and side
+            priority = OrderPriority.NORMAL
+            if reduceOnly or side == 'sell':
+                priority = OrderPriority.HIGH
+            if params and params.get('stop_loss'):
+                priority = OrderPriority.CRITICAL
+            
+            # Create fast order
+            fast_order = FastOrder(
+                pair=pair,
+                order_type=ordertype,
+                side=side,
+                amount=amount,
+                price=rate,
+                params=params or {},
+                priority=priority
+            )
+            
+            # Run async order placement
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If we're in an async context, create a task
+                future = asyncio.create_task(
+                    self.fast_order_manager.place_order(fast_order)
+                )
+                # Wait synchronously (not ideal but maintains API compatibility)
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    result = executor.submit(asyncio.run, 
+                                           self.fast_order_manager.place_order(fast_order)).result()
+                return result
+            else:
+                # Run in new event loop
+                return asyncio.run(self.fast_order_manager.place_order(fast_order))
+        
+        # Fall back to standard order creation
+        return super().create_order(
+            pair=pair,
+            ordertype=ordertype,
+            side=side,
+            amount=amount,
+            rate=rate,
+            leverage=leverage,
+            reduceOnly=reduceOnly,
+            time_in_force=time_in_force
+        )
 
     def get_tickers(
         self,
