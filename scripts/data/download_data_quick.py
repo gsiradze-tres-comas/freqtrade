@@ -18,7 +18,7 @@ PAIRS = [
     "SOL/USDT:USDT",
     "ADA/USDT:USDT",
     "DOT/USDT:USDT",
-    "MATIC/USDT:USDT",
+    "POL/USDT:USDT",
     "LINK/USDT:USDT",
     "AVAX/USDT:USDT",
     "UNI/USDT:USDT",
@@ -113,8 +113,8 @@ def main():
     failed_downloads = []
     start_time = time.time()
     
-    # Filter out problematic pairs (MATIC and FTM)
-    active_pairs = [pair for pair in PAIRS if pair not in ["MATIC/USDT:USDT", "FTM/USDT:USDT"]]
+    # Filter out problematic pairs (POL and FTM)
+    active_pairs = [pair for pair in PAIRS if pair not in ["POL/USDT:USDT", "FTM/USDT:USDT"]]
     
     # Try batch download first (like essential script)
     print(f"Attempting batch download for {len(active_pairs)} pairs...")

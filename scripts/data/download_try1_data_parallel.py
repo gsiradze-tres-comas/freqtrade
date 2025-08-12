@@ -21,7 +21,7 @@ PAIRS = [
     "SOL/USDT:USDT",
     "ADA/USDT:USDT",
     "DOT/USDT:USDT",
-    "MATIC/USDT:USDT",
+    "POL/USDT:USDT",
     "LINK/USDT:USDT",
     "AVAX/USDT:USDT",
     "UNI/USDT:USDT",

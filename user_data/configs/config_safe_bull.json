@@ -1,28 +1,19 @@
 {
+    "trading_mode": "futures",
+    "margin_mode": "isolated",
     "max_open_trades": 15,
     "stake_currency": "USDT",
     "stake_amount": "unlimited",
     "tradable_balance_ratio": 0.99,
     "fiat_display_currency": "USD",
-    "timeframe": "5m",
     "dry_run": true,
-    "_SAFETY_LOCK": "DO NOT CHANGE dry_run to false - REAL TRADING DISABLED FOR SAFETY",
     "dry_run_wallet": 10000,
     "cancel_open_orders_on_exit": false,
-    "enable_fast_orders": false,
-    "order_pool_size": 20,
-    "circuit_breaker_enabled": true,
-    "circuit_breaker_max_failures": 10,
-    "circuit_breaker_window": 60,
-    "use_order_ws": true,
-    "enable_order_presigning": true,
-    "trading_mode": "futures",
-    "margin_mode": "isolated",
     "unfilledtimeout": {
-        "entry": 5,
-        "exit": 5,
+        "entry": 10,
+        "exit": 10,
         "exit_timeout_count": 0,
-        "unit": "seconds"
+        "unit": "minutes"
     },
     "entry_pricing": {
         "price_side": "same",
@@ -35,7 +26,7 @@
         }
     },
     "exit_pricing": {
-        "price_side": "other",
+        "price_side": "same",
         "use_order_book": true,
         "order_book_top": 1
     },
@@ -43,42 +34,32 @@
         "name": "binance",
         "key": "",
         "secret": "",
-        "proxy": "",
-        "proxy_coin": "USDT",
         "ccxt_config": {
             "enableRateLimit": true,
-            "rateLimit": 50,
-            "options": {
-                "defaultType": "future",
-                "recvWindow": 5000,
-                "timeSynchronization": {
-                    "enabled": true,
-                    "adjustForTimeDifference": true
-                }
-            }
+            "rateLimit": 30
         },
         "ccxt_async_config": {
             "enableRateLimit": true,
-            "rateLimit": 50
+            "rateLimit": 30
         },
         "pair_whitelist": [
             "BTC/USDT:USDT",
             "ETH/USDT:USDT",
-            "DOGE/USDT:USDT",
-            "ADA/USDT:USDT",
+            "BNB/USDT:USDT",
             "XRP/USDT:USDT",
             "SOL/USDT:USDT",
+            "ADA/USDT:USDT",
             "AVAX/USDT:USDT",
-            "LINK/USDT:USDT",
-            "BNB/USDT:USDT",
-            "BCH/USDT:USDT",
-            "TIA/USDT:USDT",
+            "DOGE/USDT:USDT",
             "DOT/USDT:USDT",
             "POL/USDT:USDT",
+            "LINK/USDT:USDT",
             "UNI/USDT:USDT",
-            "1INCH/USDT:USDT"
+            "BCH/USDT:USDT",
+            "XLM/USDT:USDT"
         ],
         "pair_blacklist": [
+            "BNB/.*"
         ]
     },
     "pairlists": [
@@ -86,8 +67,6 @@
             "method": "StaticPairList"
         }
     ],
-    "leverage_mode": "cross",
-    "liquidation_buffer": 0.05,
     "edge": {
         "enabled": false,
         "process_throttle_secs": 3600,
@@ -104,33 +83,28 @@
     },
     "telegram": {
         "enabled": false,
-        "token": "your_telegram_token",
-        "chat_id": "your_telegram_chat_id"
-    },
-    "webhook": {
-        "enabled": false
+        "token": "",
+        "chat_id": ""
     },
     "api_server": {
         "enabled": true,
         "listen_ip_address": "127.0.0.1",
-        "listen_port": 8080,
+        "listen_port": 8081,
         "verbosity": "error",
         "enable_openapi": false,
-        "jwt_secret_key": "c2a24fa7dc8d7ad0f60d02c00f9fbbfff8b2e1e9e35f8e3c8e8f8e1e1e1e1e1e",
+        "jwt_secret_key": "9e2f6a3c8b5d1e4f7a2c6b9d3e6f9a3c8b5d1e4f7a2c6b9d3e6f9a3c8b5d1e4f",
+        "ws_token": "hft_ws_token_secure_2024",
         "CORS_origins": [],
         "username": "freqtrade",
         "password": "freqtrade"
     },
-    "bot_name": "freqtrade_hft",
+    "bot_name": "SafeBullRider",
     "initial_state": "running",
     "force_entry_enable": false,
+    "strategy": "SafeBullRiderStrategy",
     "internals": {
-        "process_throttle_secs": 1,
-        "heartbeat_interval": 60
+        "process_throttle_secs": 3
     },
-    "strategy": "Try1BullRiderStrategy",
-    "db_url": "postgresql://postgres:postgres@127.0.0.1:5433/freqtrade_db",
-    "logfile": "user_data/logs/freqtrade_hft.log",
-    "dataformat_ohlcv": "feather",
-    "dataformat_trades": "feather"
+    "db_url": "postgresql://postgres:postgres@127.0.0.1:5433/freqtrade_safe_db",
+    "logfile": "user_data/logs/freqtrade_safe.log"
 }

@@ -27,6 +27,9 @@ class Try1BullRiderStrategy(IStrategy):
     timeframe = '5m'
     can_short = False  # DISABLE SHORTS IN BULL MARKETS
     
+    # Need startup candles for EMA 50, rolling averages, ATR
+    startup_candle_count = 100
+    
     # WIDER ROI for bull market swings
     minimal_roi = {
         "0": 0.04,    # 4% target (capture bigger moves)
@@ -54,6 +57,32 @@ class Try1BullRiderStrategy(IStrategy):
     volume_multiplier = DecimalParameter(0.8, 1.5, decimals=1, default=1.2, space="buy", load=True)
     trend_strength = DecimalParameter(0.003, 0.008, decimals=3, default=0.005, space="buy", load=True)
     
+    # Plot configuration for FreqUI visualization
+    plot_config = {
+        'main_plot': {
+            'ema_8': {'color': 'blue', 'type': 'line'},
+            'ema_21': {'color': 'orange', 'type': 'line'},
+            'ema_50': {'color': 'red', 'type': 'line'},
+        },
+        'subplots': {
+            "RSI": {
+                'rsi': {'color': 'purple'},
+            },
+            "Volume": {
+                'volume': {'color': 'gray', 'type': 'bar'},
+                'volume_mean': {'color': 'blue', 'type': 'line'},
+            },
+            "Momentum": {
+                'momentum_5': {'color': 'green'},
+                'momentum_20': {'color': 'red'},
+            },
+            "Trends": {
+                'uptrend': {'color': 'green', 'type': 'bar'},
+                'downtrend': {'color': 'red', 'type': 'bar'},
+            }
+        }
+    }
+
     def populate_indicators(self, dataframe: DataFrame, metadata: Dict) -> DataFrame:
         """Simple, effective indicators - NO OVERENGINEERING"""
         
@@ -81,13 +110,13 @@ class Try1BullRiderStrategy(IStrategy):
             (dataframe['ema_8'] > dataframe['ema_21']) &
             (dataframe['ema_21'] > dataframe['ema_50']) &
             (dataframe['close'] > dataframe['ema_8'])
-        )
+        ).astype(int)
         
         dataframe['downtrend'] = (
             (dataframe['ema_8'] < dataframe['ema_21']) &
             (dataframe['ema_21'] < dataframe['ema_50']) &
             (dataframe['close'] < dataframe['ema_8'])
-        )
+        ).astype(int)
         
         # Candle patterns (basic)
         dataframe['green_candle'] = (dataframe['close'] > dataframe['open']).astype(int)
@@ -256,6 +285,12 @@ class Try1BullRiderStrategy(IStrategy):
         """
         Simple confirmation - don't block trades!
         """
+        
+        # Block trading on weekends (Saturday = 5, Sunday = 6)
+        # Using UTC time as default
+        if current_time.weekday() in [5, 6]:
+            logger.info(f"Blocking trade for {pair} - Weekend trading disabled (Day: {current_time.strftime('%A')})")
+            return False
         
         # Only basic sanity checks
         dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
