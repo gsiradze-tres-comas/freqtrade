@@ -7,7 +7,7 @@
     "timeframe": "5m",
     "dry_run": true,
     "_SAFETY_LOCK": "DO NOT CHANGE dry_run to false - REAL TRADING DISABLED FOR SAFETY",
-    "dry_run_wallet": 10000,
+    "dry_run_wallet": 2000,
     "cancel_open_orders_on_exit": false,
     "enable_fast_orders": false,
     "order_pool_size": 20,

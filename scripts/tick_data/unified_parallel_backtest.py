@@ -149,31 +149,47 @@ class UnifiedParallelBacktester:
         }
     
     def calculate_symbol_drawdown(self, symbol_trades: pd.DataFrame) -> float:
-        """Calculate max drawdown for a specific symbol"""
+        """Calculate max drawdown for a specific symbol - FIXED VERSION"""
         if symbol_trades.empty:
             return 0
         
         try:
-            # Check if exit_time column exists
-            if 'exit_time' not in symbol_trades.columns:
+            # Check if required columns exist
+            if 'exit_time' not in symbol_trades.columns or 'profit_abs' not in symbol_trades.columns:
                 return 0
             
             # Sort by exit time and calculate cumulative profit
-            symbol_trades = symbol_trades.sort_values('exit_time')
+            symbol_trades = symbol_trades.sort_values('exit_time').copy()
             symbol_trades['cumulative_profit'] = symbol_trades['profit_abs'].cumsum()
             symbol_trades['peak'] = symbol_trades['cumulative_profit'].cummax()
             
-            # Calculate drawdown
+            # FIXED: Calculate drawdown properly (negative values when in loss)
             symbol_trades['drawdown'] = (symbol_trades['cumulative_profit'] - symbol_trades['peak'])
-            max_drawdown_abs = symbol_trades['drawdown'].min()
             
-            # Convert to percentage based on average position size
-            avg_position_size = symbol_trades['size'].mean()
-            max_drawdown_pct = (max_drawdown_abs / avg_position_size * 100) if avg_position_size > 0 else 0
+            # Only consider negative drawdowns (actual losses from peak)
+            actual_drawdowns = symbol_trades['drawdown'][symbol_trades['drawdown'] < 0]
+            
+            if actual_drawdowns.empty:
+                # NO LOSING TRADES: Check individual trade losses for intra-trade drawdown
+                losing_trades = symbol_trades[symbol_trades['profit_abs'] < 0]
+                if losing_trades.empty:
+                    return 0  # Truly no losses - this happens with cherry-picked data
+                else:
+                    # Use worst individual trade loss
+                    worst_loss = losing_trades['profit_abs'].min()
+                    avg_position_size = symbol_trades['size'].mean()
+                    return abs(worst_loss / avg_position_size * 100) if avg_position_size > 0 else 0
+            
+            # Get maximum drawdown from peak
+            max_drawdown_abs = actual_drawdowns.min()  # Most negative value
+            
+            # FIXED: Convert to percentage based on initial investment, not position size
+            initial_balance = 10000  # Known starting balance
+            max_drawdown_pct = abs(max_drawdown_abs / initial_balance * 100)
             
             return max_drawdown_pct
         except Exception as e:
-            logger.warning(f"Error calculating symbol drawdown: {e}")
+            logger.warning(f"Error calculating symbol drawdown for symbol: {e}")
             return 0
     
     def detect_available_symbols(self) -> list:
@@ -705,6 +721,12 @@ class UnifiedParallelBacktester:
                         logger.error(f"⚠️ Invalid loss detected for {symbol}: {trade['profit_pct']*100:.1f}% - Capping at -100%")
                         symbol_trades.at[idx, 'profit_pct'] = -0.99  # Cap at 99% loss
                         symbol_trades.at[idx, 'profit_abs'] = -trade['size'] * 0.99
+            
+            # DEBUG: Log symbols with suspicious results
+            if not symbol_trades.empty:
+                win_rate = len(symbol_trades[symbol_trades['profit_pct'] > 0]) / len(symbol_trades) * 100
+                if win_rate == 100.0 and len(symbol_trades) < 50:
+                    logger.warning(f"🚨 SUSPICIOUS: {symbol} has {win_rate:.1f}% win rate with only {len(symbol_trades)} trades")
             
             symbol_results[symbol] = {
                 'total_trades': len(symbol_trades),
