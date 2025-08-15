@@ -157,22 +157,48 @@ class SafeRealisticBacktester(TickBacktester):
         }
     
     def update_portfolio_balance(self, timestamp, current_prices=None):
-        """Update portfolio balance tracking with total portfolio value - FIXED"""
+        """Update portfolio balance tracking with total portfolio value - ENHANCED"""
         total_portfolio_value = self.calculate_total_portfolio_value(current_prices)
         
-        self.balance_history.append({
+        # Enhanced tracking with more details
+        balance_entry = {
             'timestamp': timestamp,
             'balance': total_portfolio_value,
             'available_cash': self.portfolio.available_balance,
             'open_positions': len(self.portfolio.open_positions),
-            'position_value': total_portfolio_value - self.portfolio.available_balance
-        })
+            'position_value': total_portfolio_value - self.portfolio.available_balance,
+            'balance_change_pct': 0.0,
+            'is_new_peak': False,
+            'current_drawdown_pct': 0.0
+        }
+        
+        # Calculate balance change percentage
+        if len(self.balance_history) > 0:
+            prev_balance = self.balance_history[-1]['balance']
+            balance_entry['balance_change_pct'] = ((total_portfolio_value - prev_balance) / prev_balance) * 100
+            
+            # Check if this is a new peak
+            all_balances = [entry['balance'] for entry in self.balance_history]
+            current_peak = max(all_balances)
+            if total_portfolio_value > current_peak:
+                balance_entry['is_new_peak'] = True
+                
+            # Calculate current drawdown from peak
+            balance_entry['current_drawdown_pct'] = ((current_peak - total_portfolio_value) / current_peak) * 100
+        
+        self.balance_history.append(balance_entry)
         
         # Track daily snapshots for proper drawdown analysis
         date_str = timestamp.strftime('%Y-%m-%d')
         if date_str not in self.daily_balance_snapshots:
             self.daily_balance_snapshots[date_str] = []
         self.daily_balance_snapshots[date_str].append(total_portfolio_value)
+        
+        # Real-time drawdown warnings
+        if balance_entry['current_drawdown_pct'] > 15:
+            logger.warning(f"⚠️  REAL-TIME DRAWDOWN ALERT: {balance_entry['current_drawdown_pct']:.1f}% at {timestamp}")
+        elif balance_entry['is_new_peak']:
+            logger.info(f"🎯 NEW PORTFOLIO PEAK: ${total_portfolio_value:,.2f} at {timestamp}")
         
     def create_5min_candles(self, tick_df):
         """Convert tick data to 5-minute OHLCV candles (matches SafeBullRider 5m timeframe)"""
@@ -366,6 +392,21 @@ class SafeRealisticBacktester(TickBacktester):
         logger.info(f"Trading pairs: {', '.join(self.trading_pairs)}")
         logger.info("Only essential daily loss limit checks - NO weekend filters")
         
+        # Create progress file for monitoring long backtests
+        progress_file = Path("user_data/backtest_progress.json")
+        self.progress_info = {
+            'start_time': datetime.now().isoformat(),
+            'total_days': (end_date - start_date).days + 1,
+            'current_day': 0,
+            'current_date': '',
+            'progress_pct': 0.0,
+            'estimated_completion': '',
+            'current_balance': self.portfolio.balance,
+            'total_trades': 0,
+            'pairs_processed': 0,
+            'status': 'running'
+        }
+        
         # Reset portfolio
         self.portfolio = Portfolio()
         self.portfolio.initial_balance = 2000
@@ -532,6 +573,28 @@ class SafeRealisticBacktester(TickBacktester):
                 if pair_summary:
                     logger.info(f"Positions: {pair_summary}")
             
+            # Update progress tracking
+            self.progress_info['current_day'] = day_count
+            self.progress_info['current_date'] = current_date.strftime('%Y-%m-%d')
+            self.progress_info['progress_pct'] = (day_count / total_days) * 100
+            self.progress_info['current_balance'] = self.portfolio.balance
+            self.progress_info['total_trades'] = len(self.portfolio.closed_trades)
+            
+            # Estimate completion time
+            if day_count > 1:
+                elapsed_time = time.time() - start_time
+                time_per_day = elapsed_time / day_count
+                remaining_days = total_days - day_count
+                estimated_remaining = remaining_days * time_per_day
+                completion_time = datetime.now() + timedelta(seconds=estimated_remaining)
+                self.progress_info['estimated_completion'] = completion_time.strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Save progress every 5 days or at major milestones
+            if day_count % 5 == 0 or self.progress_info['progress_pct'] in [25, 50, 75]:
+                import json
+                with open(progress_file, 'w') as f:
+                    json.dump(self.progress_info, f, indent=2)
+            
             current_date += timedelta(days=1)
         
         # Close remaining positions
@@ -553,6 +616,17 @@ class SafeRealisticBacktester(TickBacktester):
         
         results = self.generate_results()
         self.export_freqtrade_format(results, start_date, end_date)
+        
+        # Mark backtest as completed
+        self.progress_info['status'] = 'completed'
+        self.progress_info['progress_pct'] = 100.0
+        self.progress_info['completion_time'] = datetime.now().isoformat()
+        
+        import json
+        with open(progress_file, 'w') as f:
+            json.dump(self.progress_info, f, indent=2)
+        
+        logger.info(f"📁 Progress tracking saved to {progress_file}")
         
         return results
     
@@ -823,6 +897,7 @@ class SafeRealisticBacktester(TickBacktester):
     def export_freqtrade_format(self, results, start_date, end_date):
         """Export multi-pair backtest results in Freqtrade standard format"""
         import json
+        import csv
         from pathlib import Path
         import time as time_module
         
@@ -904,6 +979,91 @@ class SafeRealisticBacktester(TickBacktester):
         
         logger.info(f"✅ SafeBullRider backtest results exported to {filepath}")
         logger.info(f"📊 View in FreqUI: http://127.0.0.1:8080")
+        
+        # Export detailed CSV for analysis
+        csv_filename = f"backtest-analysis-safe-{timestamp}.csv"
+        csv_filepath = results_dir / csv_filename
+        
+        # Export per-pair performance CSV
+        with open(csv_filepath, 'w', newline='') as csvfile:
+            fieldnames = ['pair', 'trades', 'wins', 'losses', 'win_rate_pct', 'total_pnl', 'avg_pnl_per_trade', 
+                         'best_trade', 'worst_trade', 'avg_hold_time_min', 'sharpe_ratio', 'max_drawdown_pct']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            # Calculate additional metrics per pair
+            pair_stats = {}
+            for trade in self.portfolio.closed_trades:
+                symbol = trade.symbol
+                if symbol not in pair_stats:
+                    pair_stats[symbol] = {
+                        'trades': [], 'wins': 0, 'losses': 0, 'total_pnl': 0,
+                        'hold_times': [], 'returns': []
+                    }
+                
+                pair_stats[symbol]['trades'].append(trade)
+                pair_stats[symbol]['total_pnl'] += trade.pnl
+                if trade.is_winner:
+                    pair_stats[symbol]['wins'] += 1
+                else:
+                    pair_stats[symbol]['losses'] += 1
+                
+                # Calculate hold time and returns
+                hold_time = (trade.exit_time - trade.entry_time).total_seconds() / 60  # minutes
+                pair_stats[symbol]['hold_times'].append(hold_time)
+                
+                # Calculate return percentage
+                return_pct = (trade.pnl / trade.stake_amount) * 100 if trade.stake_amount > 0 else 0
+                pair_stats[symbol]['returns'].append(return_pct)
+            
+            # Write CSV rows
+            for symbol, stats in pair_stats.items():
+                total_trades = len(stats['trades'])
+                win_rate = (stats['wins'] / total_trades * 100) if total_trades > 0 else 0
+                avg_pnl = stats['total_pnl'] / total_trades if total_trades > 0 else 0
+                
+                # Additional metrics
+                best_trade = max([t.pnl for t in stats['trades']]) if stats['trades'] else 0
+                worst_trade = min([t.pnl for t in stats['trades']]) if stats['trades'] else 0
+                avg_hold_time = sum(stats['hold_times']) / len(stats['hold_times']) if stats['hold_times'] else 0
+                
+                # Simple Sharpe ratio approximation
+                returns = stats['returns']
+                if len(returns) > 1:
+                    import numpy as np
+                    avg_return = np.mean(returns)
+                    std_return = np.std(returns)
+                    sharpe = (avg_return / std_return) if std_return > 0 else 0
+                else:
+                    sharpe = 0
+                
+                # Simple max drawdown calculation
+                cumulative_pnl = 0
+                peak_pnl = 0
+                max_dd = 0
+                for trade in stats['trades']:
+                    cumulative_pnl += trade.pnl
+                    if cumulative_pnl > peak_pnl:
+                        peak_pnl = cumulative_pnl
+                    drawdown = (peak_pnl - cumulative_pnl) / abs(peak_pnl) * 100 if peak_pnl > 0 else 0
+                    max_dd = max(max_dd, drawdown)
+                
+                writer.writerow({
+                    'pair': symbol,
+                    'trades': total_trades,
+                    'wins': stats['wins'],
+                    'losses': stats['losses'],
+                    'win_rate_pct': round(win_rate, 1),
+                    'total_pnl': round(stats['total_pnl'], 2),
+                    'avg_pnl_per_trade': round(avg_pnl, 2),
+                    'best_trade': round(best_trade, 2),
+                    'worst_trade': round(worst_trade, 2),
+                    'avg_hold_time_min': round(avg_hold_time, 1),
+                    'sharpe_ratio': round(sharpe, 2),
+                    'max_drawdown_pct': round(max_dd, 1)
+                })
+        
+        logger.info(f"📊 Detailed CSV analysis exported to {csv_filepath}")
         
         return filepath
 
@@ -1032,8 +1192,9 @@ def main():
             if trade.is_winner:
                 pair_results[pair]['wins'] += 1
         
-        top_pairs = sorted(pair_results.items(), key=lambda x: x[1]['pnl'], reverse=True)[:5]
-        for pair, stats in top_pairs:
+        # Show ALL pairs, not just top 5
+        all_pairs = sorted(pair_results.items(), key=lambda x: x[1]['pnl'], reverse=True)
+        for pair, stats in all_pairs:
             win_rate = (stats['wins'] / stats['trades']) * 100 if stats['trades'] > 0 else 0
             print(f"  {pair:<10} | {stats['trades']} trades | ${stats['pnl']:+.2f} | {win_rate:.0f}% win rate")
         

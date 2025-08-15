@@ -35,6 +35,7 @@ TRADING_PAIRS = [
     "BCHUSDT",
     "TIAUSDT",
     "DOTUSDT",
+    "POLUSDT",
     "UNIUSDT",
     "1INCHUSDT"
 ]
