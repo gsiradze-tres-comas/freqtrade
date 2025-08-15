@@ -401,7 +401,7 @@ class SafeRealisticBacktester(TickBacktester):
             'current_date': '',
             'progress_pct': 0.0,
             'estimated_completion': '',
-            'current_balance': self.portfolio.balance,
+            'current_balance': self.portfolio.available_balance,
             'total_trades': 0,
             'pairs_processed': 0,
             'status': 'running'
@@ -577,7 +577,7 @@ class SafeRealisticBacktester(TickBacktester):
             self.progress_info['current_day'] = day_count
             self.progress_info['current_date'] = current_date.strftime('%Y-%m-%d')
             self.progress_info['progress_pct'] = (day_count / total_days) * 100
-            self.progress_info['current_balance'] = self.portfolio.balance
+            self.progress_info['current_balance'] = self.portfolio.available_balance
             self.progress_info['total_trades'] = len(self.portfolio.closed_trades)
             
             # Estimate completion time
