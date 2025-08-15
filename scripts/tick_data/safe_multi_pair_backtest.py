@@ -1012,8 +1012,9 @@ class SafeRealisticBacktester(TickBacktester):
                 hold_time = (trade.exit_time - trade.entry_time).total_seconds() / 60  # minutes
                 pair_stats[symbol]['hold_times'].append(hold_time)
                 
-                # Calculate return percentage
-                return_pct = (trade.pnl / trade.stake_amount) * 100 if trade.stake_amount > 0 else 0
+                # Calculate return percentage (stake_amount = entry_price * quantity)
+                stake_amount = trade.entry_price * trade.quantity if hasattr(trade, 'quantity') and trade.quantity > 0 else 1
+                return_pct = (trade.pnl / stake_amount) * 100 if stake_amount > 0 else 0
                 pair_stats[symbol]['returns'].append(return_pct)
             
             # Write CSV rows
