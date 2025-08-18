@@ -1,7 +1,13 @@
 # Freqtrade Production-Ready Trading Bot
 
 ## Project Overview
-This is a Freqtrade-based cryptocurrency trading bot focused on the profitable Try1BullRiderStrategy. The goal is to create a safe, production-ready system for automated crypto trading on Binance.
+This is a Freqtrade-based cryptocurrency trading bot focused on the **SafeBullRiderStrategy** (our main production strategy). The goal is to create a safe, production-ready system for automated crypto trading on Binance.
+
+**🎯 MAIN STRATEGY: SafeBullRiderStrategy**
+- **Primary Config**: `config_safe_bull.json`
+- **Enhanced Safety**: Daily loss limits, market crash detection, correlation limits
+- **Risk Management**: Improved position sizing and emergency controls
+- **Current Status**: Active in paper trading and backtesting
 
 ## 📁 IMPORTANT: Folder Structure Guidelines
 
@@ -138,9 +144,18 @@ A safer version with risk management features has been created to address the Au
 
 ## 🚀 Most Run Scripts - Quick Reference
 
-### **Paper Trading (Live Bot)**
+### **Paper Trading (Live Bot) - SafeBullRider Strategy**
 ```bash
-# Start paper trading bot (most common)
+# 🎯 MAIN: Start SafeBullRider with auto-restart (FOREGROUND)
+./scripts/trading/bot_with_restart.sh
+
+# 🚀 BACKGROUND: Start SafeBullRider with auto-restart (PERSISTENT)
+nohup ./scripts/trading/bot_with_restart.sh > user_data/logs/auto_restart_output.log 2>&1 &
+
+# Check if background bot is running
+ps aux | grep bot_with_restart
+
+# Legacy: Start paper trading bot without auto-restart  
 ./scripts/trading/start_paper_trading.sh
 
 # Monitor performance in real-time
@@ -149,18 +164,41 @@ A safer version with risk management features has been created to address the Au
 # Check live logs 
 tail -f user_data/logs/freqtrade_hft.log
 
-# Stop the bot safely
+# Check auto-restart logs
+tail -f user_data/logs/bot_restarts.log
+
+# Check background script output
+tail -f user_data/logs/auto_restart_output.log
+
+# Stop the bot safely (kills both foreground and background)
 ./scripts/trading/kill_script.sh
 
 # Web interface (trading dashboard)
-# http://127.0.0.1:8080 (login: freqtrade/freqtrade)
+# http://127.0.0.1:8081 (login: freqtrade/freqtrade) - SafeBullRider
+# http://127.0.0.1:8080 (login: freqtrade/freqtrade) - Legacy Try1Bull
 ```
 
 ### **Backtesting (Strategy Testing)**
 
-#### **🚀 Unified Parallel Multi-Coin Backtesting (THE ONLY SCRIPT YOU NEED)**
+#### **🚀 SafeBullRider Strategy Backtesting (MAIN)**
 ```bash
-# THE ONE COMMAND: Parallel trading simulation like live mode
+# 🎯 MAIN: SafeBullRider backtesting (matches live trading) 
+python3 scripts/tick_data/safe_multi_pair_backtest.py --balance 3000 --recent
+
+# Full historical backtesting (3+ years of data)
+python3 scripts/tick_data/safe_multi_pair_backtest.py --balance 3000
+
+# Custom period backtesting
+python3 scripts/tick_data/safe_multi_pair_backtest.py --balance 3000 --start 2025-01-01 --end 2025-08-01
+
+# Different starting balances
+python3 scripts/tick_data/safe_multi_pair_backtest.py --balance 2000 --recent  # Default
+python3 scripts/tick_data/safe_multi_pair_backtest.py --balance 5000 --recent  # Larger test
+```
+
+#### **📦 Legacy Try1Bull Backtesting**
+```bash
+# Legacy: Unified Parallel Multi-Coin Backtesting 
 ./scripts/backtest.sh
 
 # All variations work with the same script:

@@ -33,11 +33,11 @@ class SafeRealisticBacktester(TickBacktester):
     def __init__(self):
         super().__init__()
         
-        # Your EXACT trading pairs from config_billionaire.json
+        # Your EXACT trading pairs from config_billionaire.json (1INCH removed)
         self.trading_pairs = [
             "BTCUSDT", "ETHUSDT", "DOGEUSDT", "ADAUSDT", "XRPUSDT",
             "SOLUSDT", "AVAXUSDT", "LINKUSDT", "BNBUSDT", "BCHUSDT",
-            "TIAUSDT", "DOTUSDT", "POLUSDT", "UNIUSDT", "1INCHUSDT"
+            "TIAUSDT", "DOTUSDT", "POLUSDT", "UNIUSDT"
         ]
         
         # Match your EXACT live configuration
@@ -388,6 +388,9 @@ class SafeRealisticBacktester(TickBacktester):
         import time
         start_time = time.time()
         
+        # Store custom balance before reset
+        custom_balance = self.portfolio.initial_balance
+        
         logger.info(f"Starting SafeBullRider multi-pair backtest from {start_date} to {end_date}")
         logger.info(f"Trading pairs: {', '.join(self.trading_pairs)}")
         logger.info("Only essential daily loss limit checks - NO weekend filters")
@@ -401,17 +404,17 @@ class SafeRealisticBacktester(TickBacktester):
             'current_date': '',
             'progress_pct': 0.0,
             'estimated_completion': '',
-            'current_balance': self.portfolio.available_balance,
+            'current_balance': custom_balance,
             'total_trades': 0,
             'pairs_processed': 0,
             'status': 'running'
         }
         
-        # Reset portfolio
+        # Reset portfolio with custom balance
         self.portfolio = Portfolio()
-        self.portfolio.initial_balance = 2000
-        self.portfolio.available_balance = 2000
-        self.portfolio.current_balance = 2000
+        self.portfolio.initial_balance = custom_balance
+        self.portfolio.available_balance = custom_balance
+        self.portfolio.current_balance = custom_balance
         self.portfolio.position_size_pct = 0.08
         self.portfolio.max_open_trades = 15
         self.position_max_profit = {}
@@ -1076,7 +1079,7 @@ def detect_available_date_range():
     trading_pairs = [
         "BTCUSDT", "ETHUSDT", "DOGEUSDT", "ADAUSDT", "XRPUSDT",
         "SOLUSDT", "AVAXUSDT", "LINKUSDT", "BNBUSDT", "BCHUSDT",
-        "TIAUSDT", "DOTUSDT", "POLUSDT", "UNIUSDT", "1INCHUSDT"
+        "TIAUSDT", "DOTUSDT", "POLUSDT", "UNIUSDT"
     ]
     
     for pair in trading_pairs:
@@ -1110,6 +1113,8 @@ def main():
                         help="End date (YYYY-MM-DD). Default: use all available data")
     parser.add_argument("--recent", action="store_true",
                         help="Test recent 3 months instead of full dataset")
+    parser.add_argument("--balance", type=float, default=2000,
+                        help="Starting balance (default: 2000)")
     
     args = parser.parse_args()
     
@@ -1142,7 +1147,7 @@ def main():
     print(f"Testing Period:   {days_total} days ({days_total / 365.25:.1f} years)")
     print(f"Strategy:         SafeBullRiderStrategy (EXACT implementation)")
     print(f"Trading Pairs:    {len(pairs_with_data)} pairs available")
-    print(f"Initial Balance:  $2,000 (realistic starting balance)")
+    print(f"Initial Balance:  ${args.balance:,.0f} (custom starting balance)")
     print(f"Max Open Trades:  15 total (max 2 per pair)")
     print(f"Position Size:    ~8% per trade (~$160 per position)")
     print(f"Weekend Filter:   DISABLED (trade 24/7)")
@@ -1158,6 +1163,10 @@ def main():
     print()
     
     backtester = SafeRealisticBacktester()
+    # Set custom starting balance
+    backtester.portfolio.initial_balance = args.balance
+    backtester.portfolio.available_balance = args.balance
+    backtester.portfolio.current_balance = args.balance
     
     try:
         results = backtester.run_realistic_backtest(start_date, end_date)
@@ -1174,13 +1183,67 @@ def main():
         print(f"Total Trades:     {summary['total_trades']}")
         print(f"Win Rate:         {summary['win_rate_pct']:.1f}%")
         
-        if 'max_drawdown_pct' in summary:
-            print(f"Max Drawdown:     {summary['max_drawdown_pct']:.2f}% (${summary['max_drawdown_usd']:.2f})")
-        
+        # Enhanced metrics with quality indicators
         if summary['total_trades'] > 0:
+            # Profit Factor with quality indicator
+            profit_factor = trade_analysis.get('profit_factor', 0)
+            if profit_factor >= 2.0:
+                pf_indicator = "✅ Excellent"
+            elif profit_factor >= 1.5:
+                pf_indicator = "✅ Good"
+            elif profit_factor >= 1.0:
+                pf_indicator = "⚠️  Marginal"
+            else:
+                pf_indicator = "❌ Poor"
+            
+            print(f"Profit Factor:    {profit_factor:.2f} {pf_indicator}")
+            
+            # Calculate portfolio Sharpe ratio
+            if len(backtester.balance_history) > 1:
+                import numpy as np
+                balance_values = [entry['balance'] for entry in backtester.balance_history]
+                returns = np.diff(balance_values) / balance_values[:-1]
+                returns_mean = np.mean(returns)
+                returns_std = np.std(returns, ddof=1) if len(returns) > 1 else 0
+                
+                # Annualized Sharpe ratio (assuming 5-min intervals)
+                periods_per_year = 365 * 24 * 12  # 5-min periods in a year
+                sharpe_ratio = (returns_mean * periods_per_year) / (returns_std * np.sqrt(periods_per_year)) if returns_std > 0 else 0
+                
+                if sharpe_ratio >= 2.0:
+                    sharpe_indicator = "✅ Excellent"
+                elif sharpe_ratio >= 1.0:
+                    sharpe_indicator = "✅ Good"
+                elif sharpe_ratio >= 0.5:
+                    sharpe_indicator = "⚠️  Marginal"
+                else:
+                    sharpe_indicator = "❌ Poor"
+                
+                print(f"Sharpe Ratio:     {sharpe_ratio:.2f} {sharpe_indicator}")
+            
+            # Max Drawdown with better formatting
+            if 'max_drawdown_pct' in summary:
+                dd_pct = summary['max_drawdown_pct']
+                if dd_pct <= 5.0:
+                    dd_indicator = "✅ Low Risk"
+                elif dd_pct <= 10.0:
+                    dd_indicator = "⚠️  Moderate Risk"
+                elif dd_pct <= 20.0:
+                    dd_indicator = "❌ High Risk"
+                else:
+                    dd_indicator = "🚨 Extreme Risk"
+                
+                print(f"Max Drawdown:     {dd_pct:.2f}% (${summary['max_drawdown_usd']:.2f}) {dd_indicator}")
+        
             print(f"Avg Trade:        ${trade_analysis['avg_trade_pnl']:+.2f}")
             print(f"Best Trade:       ${trade_analysis['max_win']:+.2f}")
             print(f"Worst Trade:      ${trade_analysis['max_loss']:+.2f}")
+            
+            # Add warnings for poor performance
+            if profit_factor < 1.0:
+                print(f"⚠️  WARNING: Poor Profit Factor: {profit_factor:.2f} (<1.0 = losing strategy)")
+            if 'max_drawdown_pct' in summary and summary['max_drawdown_pct'] > 15:
+                print(f"⚠️  WARNING: High drawdown: {summary['max_drawdown_pct']:.1f}% (>15% = high risk)")
         
         print("\\n📊 PORTFOLIO BREAKDOWN:")
         pair_results = {}

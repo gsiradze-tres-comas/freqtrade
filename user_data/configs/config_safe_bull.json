@@ -56,8 +56,7 @@
             "LINK/USDT:USDT",
             "UNI/USDT:USDT",
             "BCH/USDT:USDT",
-            "TIA/USDT:USDT",
-            "1INCH/USDT:USDT"
+            "TIA/USDT:USDT"
         ],
         "pair_blacklist": [
             "BNB/.*"

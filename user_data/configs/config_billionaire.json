@@ -75,8 +75,7 @@
             "TIA/USDT:USDT",
             "DOT/USDT:USDT",
             "POL/USDT:USDT",
-            "UNI/USDT:USDT",
-            "1INCH/USDT:USDT"
+            "UNI/USDT:USDT"
         ],
         "pair_blacklist": [
         ]

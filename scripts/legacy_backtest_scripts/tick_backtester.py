@@ -408,7 +408,10 @@ class TickBacktester:
         avg_win = trades_df[trades_df['is_winner']]['pnl'].mean() if winning_trades > 0 else 0
         avg_loss = trades_df[~trades_df['is_winner']]['pnl'].mean() if losing_trades > 0 else 0
         
-        profit_factor = abs(avg_win * winning_trades / avg_loss / losing_trades) if losing_trades > 0 and avg_loss < 0 else float('inf')
+        # FIXED: Proper profit factor calculation (Total Gross Profit / Total Gross Loss)
+        total_wins = trades_df[trades_df['is_winner']]['pnl'].sum() if winning_trades > 0 else 0
+        total_losses = abs(trades_df[~trades_df['is_winner']]['pnl'].sum()) if losing_trades > 0 else 0
+        profit_factor = total_wins / total_losses if total_losses > 0 else float('inf')
         
         # Portfolio performance
         initial_balance = self.portfolio.initial_balance
