@@ -161,6 +161,8 @@ class SafeBullRiderStrategy(IStrategy):
     def check_daily_loss_limit(self) -> bool:
         """Check if daily loss limit has been reached"""
         try:
+            from freqtrade.wallets import Wallets
+            
             # Get today's closed trades
             today = datetime.now().date()
             closed_trades = Trade.get_trades_proxy(is_open=False)
@@ -171,9 +173,25 @@ class SafeBullRiderStrategy(IStrategy):
                     if trade.close_profit:
                         daily_loss += min(0, trade.close_profit_abs)
             
-            # Check if loss exceeds limit (assuming 10000 starting balance)
-            if abs(daily_loss) > (10000 * self.max_daily_loss_pct):
-                logger.warning(f"Daily loss limit reached: ${abs(daily_loss):.2f}")
+            # Get current wallet balance from Freqtrade's wallet manager
+            # This will be the actual current balance including all profits/losses
+            try:
+                # Try to get wallet from bot context if available
+                if hasattr(self, '_freqtrade') and hasattr(self._freqtrade, 'wallets'):
+                    wallet_balance = self._freqtrade.wallets.get_total('USDT')
+                else:
+                    # Fallback: Calculate from all trades
+                    all_trades = Trade.get_trades_proxy()
+                    total_profit = sum(t.close_profit_abs for t in all_trades if t.close_profit_abs)
+                    # Start from initial balance and add all profits/losses
+                    wallet_balance = 2000 + total_profit  # 2000 is initial dry_run_wallet
+            except:
+                # Ultimate fallback
+                wallet_balance = 2000
+            
+            # Check if loss exceeds limit using actual current balance
+            if abs(daily_loss) > (wallet_balance * self.max_daily_loss_pct):
+                logger.warning(f"Daily loss limit reached: ${abs(daily_loss):.2f} (limit: ${wallet_balance * self.max_daily_loss_pct:.2f} on ${wallet_balance:.2f} balance)")
                 return False
                 
         except Exception as e:
@@ -184,6 +202,8 @@ class SafeBullRiderStrategy(IStrategy):
     def check_monthly_loss_limit(self) -> bool:
         """Check if monthly loss limit has been reached"""
         try:
+            from freqtrade.wallets import Wallets
+            
             # Get current month trades
             now = datetime.now()
             month_start = datetime(now.year, now.month, 1)
@@ -195,9 +215,25 @@ class SafeBullRiderStrategy(IStrategy):
                     if trade.close_profit:
                         monthly_loss += min(0, trade.close_profit_abs)
             
-            # Check if loss exceeds monthly limit
-            if abs(monthly_loss) > (10000 * self.max_monthly_loss_pct):
-                logger.warning(f"Monthly loss limit reached: ${abs(monthly_loss):.2f}")
+            # Get current wallet balance from Freqtrade's wallet manager
+            # This will be the actual current balance including all profits/losses
+            try:
+                # Try to get wallet from bot context if available
+                if hasattr(self, '_freqtrade') and hasattr(self._freqtrade, 'wallets'):
+                    wallet_balance = self._freqtrade.wallets.get_total('USDT')
+                else:
+                    # Fallback: Calculate from all trades
+                    all_trades = Trade.get_trades_proxy()
+                    total_profit = sum(t.close_profit_abs for t in all_trades if t.close_profit_abs)
+                    # Start from initial balance and add all profits/losses
+                    wallet_balance = 2000 + total_profit  # 2000 is initial dry_run_wallet
+            except:
+                # Ultimate fallback
+                wallet_balance = 2000
+            
+            # Check if loss exceeds monthly limit using actual current balance
+            if abs(monthly_loss) > (wallet_balance * self.max_monthly_loss_pct):
+                logger.warning(f"Monthly loss limit reached: ${abs(monthly_loss):.2f} (limit: ${wallet_balance * self.max_monthly_loss_pct:.2f} on ${wallet_balance:.2f} balance)")
                 return False
                 
         except Exception as e:

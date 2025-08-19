@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 EXTERNAL_STORAGE = Path.home() / "Documents" / "projects" / "tres-comas" / "tick_data"
+# Updated: Removed 1INCHUSDT to match SafeBullRider strategy
 TRADING_PAIRS = [
     "BTCUSDT",
     "ETHUSDT",
@@ -36,8 +37,7 @@ TRADING_PAIRS = [
     "TIAUSDT",
     "DOTUSDT",
     "POLUSDT",
-    "UNIUSDT",
-    "1INCHUSDT"
+    "UNIUSDT"
 ]
 
 # Binance data URL pattern
