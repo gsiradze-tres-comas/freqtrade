@@ -1,13 +1,35 @@
 {
-  "start_time": "2025-08-24T00:48:36.036080",
+  "start_time": "2025-08-24T11:56:44.226327",
   "total_days": 365,
   "current_day": 365,
   "current_date": "2022-12-31",
   "progress_pct": 100.0,
-  "estimated_completion": "2025-08-24 02:06:22",
-  "current_balance": 83.74018347408969,
-  "total_trades": 4716,
-  "pairs_processed": 0,
+  "estimated_completion": "2025-08-24 13:39:57",
+  "starting_balance": 2500.0,
+  "current_balance": 86075.0172835403,
+  "available_cash": 0.0024985743451975545,
+  "total_trades": 9770,
+  "open_positions": 15,
+  "pairs_tested": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "DOGEUSDT",
+    "ADAUSDT",
+    "XRPUSDT",
+    "SOLUSDT",
+    "AVAXUSDT",
+    "LINKUSDT",
+    "BNBUSDT",
+    "BCHUSDT",
+    "DOTUSDT",
+    "UNIUSDT"
+  ],
+  "pairs_skipped": [
+    "TIAUSDT",
+    "POLUSDT"
+  ],
   "status": "completed",
-  "completion_time": "2025-08-24T02:06:22.745932"
+  "completion_time": "2025-08-24T13:39:58.159675",
+  "final_balance": 86075.0172835403,
+  "profit_pct": 3343.0006913416123
 }

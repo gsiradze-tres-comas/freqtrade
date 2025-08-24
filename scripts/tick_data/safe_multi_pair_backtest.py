@@ -433,7 +433,43 @@ class SafeRealisticBacktester(TickBacktester):
         custom_balance = self.portfolio.initial_balance
         
         logger.info(f"Starting SafeBullRider multi-pair backtest from {start_date} to {end_date}")
-        logger.info(f"Trading pairs: {', '.join(self.trading_pairs)}")
+        
+        # CRITICAL FIX: Check data availability before declaring trading pairs
+        # As a top 1% crypto dev, we validate data exists BEFORE running
+        original_pairs = self.trading_pairs.copy()
+        pairs_with_data = []
+        pairs_missing_data = []
+        
+        # Check each pair for data availability
+        test_dates = [start_date, start_date + timedelta(days=7), end_date]  # Check start, mid, end
+        for pair in original_pairs:
+            has_data = True
+            for test_date in test_dates:
+                if test_date <= end_date:
+                    tick_file = Path(f"user_data/tick_data/{pair}/{pair}-trades-{test_date.strftime('%Y-%m-%d')}.feather")
+                    if not tick_file.exists():
+                        has_data = False
+                        break
+            
+            if has_data:
+                pairs_with_data.append(pair)
+            else:
+                pairs_missing_data.append(pair)
+        
+        # Update trading pairs to only those with data
+        if not pairs_with_data:
+            logger.error(f"❌ No pairs have data for the period {start_date} to {end_date}")
+            logger.error(f"   Please download tick data first using:")
+            logger.error(f"   python3 scripts/tick_data/download_all_pairs_1year.py --start-date {start_date} --end-date {end_date}")
+            return None
+        
+        self.trading_pairs = pairs_with_data
+        
+        # Log data availability status
+        logger.info(f"✅ Pairs with data ({len(pairs_with_data)}): {', '.join(pairs_with_data)}")
+        if pairs_missing_data:
+            logger.warning(f"⚠️ Pairs skipped - no data ({len(pairs_missing_data)}): {', '.join(pairs_missing_data)}")
+        
         logger.info("Only essential daily loss limit checks - NO weekend filters")
         
         # Create progress file for monitoring long backtests
@@ -450,7 +486,8 @@ class SafeRealisticBacktester(TickBacktester):
             'available_cash': custom_balance,
             'total_trades': 0,
             'open_positions': 0,
-            'pairs_processed': 0,
+            'pairs_tested': pairs_with_data,
+            'pairs_skipped': pairs_missing_data,
             'status': 'running'
         }
         
@@ -698,6 +735,9 @@ class SafeRealisticBacktester(TickBacktester):
             json.dump(self.progress_info, f, indent=2)
         
         logger.info(f"📁 Progress tracking saved to {progress_file}")
+        
+        # Restore original pairs list for future runs
+        self.trading_pairs = original_pairs
         
         return results
     
@@ -1420,6 +1460,11 @@ def main():
     
     try:
         results = backtester.run_realistic_backtest(start_date, end_date)
+        
+        # Handle case where no data is available
+        if results is None:
+            print("\\n❌ Backtest could not be completed due to missing data")
+            return
         
         # Display results
         summary = results.get('backtest_summary', {})
