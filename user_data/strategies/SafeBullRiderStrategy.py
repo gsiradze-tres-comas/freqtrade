@@ -173,25 +173,41 @@ class SafeBullRiderStrategy(IStrategy):
                     if trade.close_profit:
                         daily_loss += min(0, trade.close_profit_abs)
             
-            # Get current wallet balance from Freqtrade's wallet manager
-            # This will be the actual current balance including all profits/losses
+            # FIXED: Get TOTAL portfolio value (cash + open positions), not just cash
             try:
-                # Try to get wallet from bot context if available
+                total_portfolio_value = 0
+                
+                # Get available balance (cash)
                 if hasattr(self, '_freqtrade') and hasattr(self._freqtrade, 'wallets'):
-                    wallet_balance = self._freqtrade.wallets.get_total('USDT')
+                    available_balance = self._freqtrade.wallets.get_total('USDT')
+                    total_portfolio_value = available_balance
+                    
+                    # Add value of open positions
+                    open_trades = Trade.get_trades_proxy(is_open=True)
+                    for trade in open_trades:
+                        # Use current stake amount as position value
+                        # In live trading, this would use current market price
+                        position_value = trade.stake_amount
+                        total_portfolio_value += position_value
                 else:
                     # Fallback: Calculate from all trades
                     all_trades = Trade.get_trades_proxy()
                     total_profit = sum(t.close_profit_abs for t in all_trades if t.close_profit_abs)
                     # Start from initial balance and add all profits/losses
-                    wallet_balance = 2000 + total_profit  # 2000 is initial dry_run_wallet
+                    base_balance = 2000 + total_profit  # 2000 is initial dry_run_wallet
+                    
+                    # Add open position values
+                    open_trades = Trade.get_trades_proxy(is_open=True)
+                    open_value = sum(t.stake_amount for t in open_trades)
+                    
+                    total_portfolio_value = base_balance + open_value
             except:
                 # Ultimate fallback
-                wallet_balance = 2000
+                total_portfolio_value = 2000
             
-            # Check if loss exceeds limit using actual current balance
-            if abs(daily_loss) > (wallet_balance * self.max_daily_loss_pct):
-                logger.warning(f"Daily loss limit reached: ${abs(daily_loss):.2f} (limit: ${wallet_balance * self.max_daily_loss_pct:.2f} on ${wallet_balance:.2f} balance)")
+            # Check if loss exceeds limit using TOTAL PORTFOLIO VALUE
+            if abs(daily_loss) > (total_portfolio_value * self.max_daily_loss_pct):
+                logger.warning(f"Daily loss limit reached: ${abs(daily_loss):.2f} (limit: ${total_portfolio_value * self.max_daily_loss_pct:.2f} on ${total_portfolio_value:.2f} portfolio)")
                 return False
                 
         except Exception as e:
@@ -215,25 +231,40 @@ class SafeBullRiderStrategy(IStrategy):
                     if trade.close_profit:
                         monthly_loss += min(0, trade.close_profit_abs)
             
-            # Get current wallet balance from Freqtrade's wallet manager
-            # This will be the actual current balance including all profits/losses
+            # FIXED: Get TOTAL portfolio value (cash + open positions), not just cash
             try:
-                # Try to get wallet from bot context if available
+                total_portfolio_value = 0
+                
+                # Get available balance (cash)
                 if hasattr(self, '_freqtrade') and hasattr(self._freqtrade, 'wallets'):
-                    wallet_balance = self._freqtrade.wallets.get_total('USDT')
+                    available_balance = self._freqtrade.wallets.get_total('USDT')
+                    total_portfolio_value = available_balance
+                    
+                    # Add value of open positions
+                    open_trades = Trade.get_trades_proxy(is_open=True)
+                    for trade in open_trades:
+                        # Use current stake amount as position value
+                        position_value = trade.stake_amount
+                        total_portfolio_value += position_value
                 else:
                     # Fallback: Calculate from all trades
                     all_trades = Trade.get_trades_proxy()
                     total_profit = sum(t.close_profit_abs for t in all_trades if t.close_profit_abs)
                     # Start from initial balance and add all profits/losses
-                    wallet_balance = 2000 + total_profit  # 2000 is initial dry_run_wallet
+                    base_balance = 2000 + total_profit  # 2000 is initial dry_run_wallet
+                    
+                    # Add open position values
+                    open_trades = Trade.get_trades_proxy(is_open=True)
+                    open_value = sum(t.stake_amount for t in open_trades)
+                    
+                    total_portfolio_value = base_balance + open_value
             except:
                 # Ultimate fallback
-                wallet_balance = 2000
+                total_portfolio_value = 2000
             
-            # Check if loss exceeds monthly limit using actual current balance
-            if abs(monthly_loss) > (wallet_balance * self.max_monthly_loss_pct):
-                logger.warning(f"Monthly loss limit reached: ${abs(monthly_loss):.2f} (limit: ${wallet_balance * self.max_monthly_loss_pct:.2f} on ${wallet_balance:.2f} balance)")
+            # Check if loss exceeds monthly limit using TOTAL PORTFOLIO VALUE
+            if abs(monthly_loss) > (total_portfolio_value * self.max_monthly_loss_pct):
+                logger.warning(f"Monthly loss limit reached: ${abs(monthly_loss):.2f} (limit: ${total_portfolio_value * self.max_monthly_loss_pct:.2f} on ${total_portfolio_value:.2f} portfolio)")
                 return False
                 
         except Exception as e:

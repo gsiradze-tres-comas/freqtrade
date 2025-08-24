@@ -28,6 +28,13 @@ class SafeRealisticBacktester(TickBacktester):
     Multi-pair realistic backtester that matches your SafeBullRider strategy exactly
     Only essential safety checks (daily loss limit) - NO weekend filters
     Same execution engine as Try1 for fair comparison across all pairs
+    
+    BALANCE TERMINOLOGY (FIXED):
+    - available_balance: Cash available for new trades (decreases as positions open)
+    - current_balance: Legacy field, kept for compatibility (equals available_balance)
+    - calculate_total_portfolio_value(): REAL portfolio value (cash + open positions)
+    
+    All risk calculations (daily loss, position size, drawdown) now use total portfolio value
     """
     
     def __init__(self):
@@ -307,14 +314,15 @@ class SafeRealisticBacktester(TickBacktester):
                 self.emergency_brake_triggered = False
             
             # Check if current daily loss exceeds limit
-            # Use CURRENT balance, not initial balance - accounts for profits/losses
-            current_balance = self.portfolio.current_balance
-            daily_loss_limit = current_balance * self.max_daily_loss_pct
+            # FIXED: Use TOTAL portfolio value (cash + positions), not just available cash
+            # This ensures consistent risk management regardless of open positions
+            total_portfolio_value = self.calculate_total_portfolio_value()
+            daily_loss_limit = total_portfolio_value * self.max_daily_loss_pct
             
             if abs(self.daily_loss_today) > daily_loss_limit:
                 # Only warn once per day to avoid spam
                 if not self.daily_limit_warned:
-                    logger.warning(f"📛 Daily loss limit reached: ${abs(self.daily_loss_today):.2f} > ${daily_loss_limit:.2f} (5% of ${current_balance:.2f}) - Blocking new entries")
+                    logger.warning(f"📛 Daily loss limit reached: ${abs(self.daily_loss_today):.2f} > ${daily_loss_limit:.2f} (5% of ${total_portfolio_value:.2f} portfolio) - Blocking new entries")
                     self.daily_limit_warned = True
                     self.safety_stats['daily_limit_hits'] += 1
                     self.safety_stats['days_with_limits'] += 1
@@ -322,7 +330,7 @@ class SafeRealisticBacktester(TickBacktester):
                 # Emergency brake at 150% of limit (7.5% loss)
                 emergency_limit = daily_loss_limit * 1.5
                 if abs(self.daily_loss_today) > emergency_limit and not self.emergency_brake_triggered:
-                    logger.critical(f"🚨 EMERGENCY BRAKE: Daily loss ${abs(self.daily_loss_today):.2f} exceeds ${emergency_limit:.2f} (7.5% of ${current_balance:.2f})!")
+                    logger.critical(f"🚨 EMERGENCY BRAKE: Daily loss ${abs(self.daily_loss_today):.2f} exceeds ${emergency_limit:.2f} (7.5% of ${total_portfolio_value:.2f} portfolio)!")
                     self.emergency_brake_triggered = True
                     self.safety_stats['emergency_brakes'] += 1
                     # Note: In live trading, this would close all positions
@@ -437,8 +445,11 @@ class SafeRealisticBacktester(TickBacktester):
             'current_date': '',
             'progress_pct': 0.0,
             'estimated_completion': '',
+            'starting_balance': custom_balance,
             'current_balance': custom_balance,
+            'available_cash': custom_balance,
             'total_trades': 0,
+            'open_positions': 0,
             'pairs_processed': 0,
             'status': 'running'
         }
@@ -570,6 +581,23 @@ class SafeRealisticBacktester(TickBacktester):
                                     # Update portfolio balance after opening position
                                     current_prices = {pair: entry_price}
                                     self.update_portfolio_balance(candle_time, current_prices)
+                        
+                        # ENHANCED: Update portfolio balance after each candle for accurate drawdown tracking
+                        # This captures intraday movements even without trades
+                        if candle_idx == len(candles) - 1:  # Last candle of current data
+                            # Gather current prices for all pairs
+                            current_candle_prices = {}
+                            for check_pair in self.trading_pairs:
+                                if check_pair in all_candles_per_pair and len(all_candles_per_pair[check_pair]) > 0:
+                                    # Find the price at this candle time
+                                    check_candles = all_candles_per_pair[check_pair]
+                                    time_mask = check_candles['datetime'] <= candle_time
+                                    if time_mask.any():
+                                        current_candle_prices[check_pair] = check_candles[time_mask].iloc[-1]['close']
+                            
+                            # Update balance tracking with current market prices
+                            if current_candle_prices:
+                                self.update_portfolio_balance(candle_time, current_candle_prices)
             
             # FIXED: Update portfolio balance daily for accurate drawdown tracking
             current_prices = {}
@@ -613,8 +641,11 @@ class SafeRealisticBacktester(TickBacktester):
             self.progress_info['current_day'] = day_count
             self.progress_info['current_date'] = current_date.strftime('%Y-%m-%d')
             self.progress_info['progress_pct'] = (day_count / total_days) * 100
-            self.progress_info['current_balance'] = self.portfolio.available_balance
+            # FIXED: Use total portfolio value (cash + positions) instead of just available cash
+            self.progress_info['current_balance'] = self.calculate_total_portfolio_value(current_prices)
+            self.progress_info['available_cash'] = self.portfolio.available_balance
             self.progress_info['total_trades'] = len(self.portfolio.closed_trades)
+            self.progress_info['open_positions'] = len(self.portfolio.open_positions)
             
             # Estimate completion time
             if day_count > 1:
@@ -650,13 +681,17 @@ class SafeRealisticBacktester(TickBacktester):
         elapsed = time.time() - start_time
         logger.info(f"SafeBullRider backtest completed in {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
         
-        results = self.generate_results()
+        results = self.generate_custom_results()
         self.export_freqtrade_format(results, start_date, end_date)
         
         # Mark backtest as completed
         self.progress_info['status'] = 'completed'
         self.progress_info['progress_pct'] = 100.0
         self.progress_info['completion_time'] = datetime.now().isoformat()
+        # FIXED: Update final balance to show actual portfolio value after all positions closed
+        self.progress_info['current_balance'] = self.portfolio.available_balance  # All positions closed, so cash = total
+        self.progress_info['final_balance'] = self.portfolio.available_balance
+        self.progress_info['profit_pct'] = ((self.portfolio.available_balance - self.portfolio.initial_balance) / self.portfolio.initial_balance) * 100
         
         import json
         with open(progress_file, 'w') as f:
@@ -681,18 +716,23 @@ class SafeRealisticBacktester(TickBacktester):
         max_profit = self.position_max_profit[trade_id]
         
         # 1. Dynamic stop loss (SafeBullRider uses 6% base, but can be ATR-adjusted)
+        # FIXED: Match the logic from SafeBullRiderStrategy exactly
         stop_loss_pct = 0.06  # 6% base stop (SafeBullRider default)
         
-        # ATR-based adjustment if available
+        # ATR-based adjustment if available (matching strategy logic)
         if len(df) >= 1:
             last_row = df.iloc[-1]
             if not pd.isna(last_row['atr_pct']):
                 atr_multiplier = 3.0  # 3x ATR for crypto
+                # Calculate ATR-based stop (as positive percentage)
                 atr_stop = last_row['atr_pct'] * atr_multiplier
-                # Use ATR stop if wider (2% to 12% range)
+                # Clamp between 2% and 12%
                 atr_stop = max(0.02, min(0.12, atr_stop))
-                if atr_stop > stop_loss_pct:  # Only if ATR suggests wider stop
+                # Use wider stop for volatile markets (matching strategy intent)
+                # Strategy comment says "Use ATR stop if wider than base stop"
+                if atr_stop > stop_loss_pct:
                     stop_loss_pct = atr_stop
+                    logger.debug(f"Using ATR-based stop: {stop_loss_pct:.1%} instead of base 6%")
 
         if pnl_pct <= -stop_loss_pct:
             return "stop_loss", current_price
@@ -717,13 +757,17 @@ class SafeRealisticBacktester(TickBacktester):
     
     def custom_stake_amount(self, current_balance, df):
         """SafeBullRider position sizing with volatility adjustment"""
+        # FIXED: Use total portfolio value for consistent position sizing
+        # This prevents positions from shrinking as more trades open
+        total_portfolio = self.calculate_total_portfolio_value()
+        
         if len(df) < 2:
-            return current_balance * 0.08
+            return total_portfolio * 0.08
         
         last_candle = df.iloc[-1]
         
-        # Base 8% position (SafeBullRider matches Try1)
-        base_stake = current_balance * 0.08
+        # Base 8% position of TOTAL portfolio (not just available cash)
+        base_stake = total_portfolio * 0.08
         
         # INCREASE size in strong trends (same as Try1)
         if last_candle['uptrend'] and last_candle['momentum_20'] > 0.02:
@@ -740,7 +784,16 @@ class SafeRealisticBacktester(TickBacktester):
         if not pd.isna(last_candle['volatility']) and last_candle['volatility'] > self.volatility_threshold:
             base_stake *= 0.8  # 20% smaller in high volatility
         
-        return base_stake
+        # SAFETY: Never use more than available cash (even if position size suggests it)
+        # This can happen when many positions are already open
+        max_stake = self.portfolio.available_balance * 0.95  # Keep 5% buffer
+        final_stake = min(base_stake, max_stake)
+        
+        # Warn if we had to reduce position size due to insufficient funds
+        if final_stake < base_stake:
+            logger.debug(f"Position size reduced from ${base_stake:.2f} to ${final_stake:.2f} due to available balance")
+        
+        return final_stake
     
     def get_tick_execution_price(self, tick_df, signal_time, is_entry=True):
         """Get realistic execution price from tick data with slippage"""
@@ -795,6 +848,9 @@ class SafeRealisticBacktester(TickBacktester):
         
         # Update portfolio
         self.portfolio.available_balance += exit_value - fees/2
+        # FIXED: current_balance should track total portfolio, not just cash
+        # But for compatibility, we'll update it to match available_balance here
+        # The real portfolio value is tracked via calculate_total_portfolio_value()
         self.portfolio.current_balance = self.portfolio.available_balance
         
         # FIXED: Update total portfolio value for accurate drawdown calculation
@@ -809,7 +865,22 @@ class SafeRealisticBacktester(TickBacktester):
         if trade_id in self.position_max_profit:
             del self.position_max_profit[trade_id]
         
-        logger.info(f"Closed {trade.symbol} @ {price:.4f}, P&L: {net_pnl:.2f} ({pnl_pct*100:.2f}%), Reason: {exit_reason}")
+        # Enhanced logging with dates, gross P&L, and visual indicators
+        # ⬆️ = profitable close, ⬇️ = loss close (works for both longs and shorts)
+        exit_indicator = "⬆️" if net_pnl > 0 else "⬇️"
+        trade_date = time.strftime('%Y-%m-%d %H:%M')
+        duration_hours = trade.duration_minutes / 60
+        
+        logger.info(
+            f"{exit_indicator} CLOSED {trade.symbol} | "
+            f"Date: {trade_date} | "
+            f"Price: {price:.4f} | "
+            f"Gross P&L: {gross_pnl:.2f} | "
+            f"Net P&L: {net_pnl:.2f} ({pnl_pct*100:.2f}%) | "
+            f"Fees: {fees:.2f} | "
+            f"Duration: {duration_hours:.1f}h | "
+            f"Reason: {exit_reason}"
+        )
         
         return trade
     
@@ -830,7 +901,20 @@ class SafeRealisticBacktester(TickBacktester):
         self.portfolio.available_balance -= (stake + fee)
         self.portfolio.open_positions.append(trade)
         
-        logger.info(f"Opened {signal} position: {symbol} @ {price:.4f}, Stake: {stake:.2f}")
+        # Enhanced logging with date and visual indicator
+        # 🟢 = long entry, 🔵 = short entry (if implemented)
+        entry_indicator = "🟢"  # Green for long positions
+        trade_date = time.strftime('%Y-%m-%d %H:%M')
+        
+        logger.info(
+            f"{entry_indicator} OPENED {symbol} | "
+            f"Date: {trade_date} | "
+            f"Signal: {signal} | "
+            f"Price: {price:.4f} | "
+            f"Stake: ${stake:.2f} | "
+            f"Quantity: {quantity:.4f} | "
+            f"Fee: ${fee:.2f}"
+        )
         
         return trade
     
@@ -983,13 +1067,13 @@ class SafeRealisticBacktester(TickBacktester):
                     "trades": freqtrade_trades,
                     "results_per_pair": self.generate_results_per_pair(results),
                     "total_trades": len(freqtrade_trades),
-                    "profit_total": results['backtest_summary']['total_return_pct'] / 100,
-                    "profit_total_abs": results['backtest_summary']['total_pnl'],
+                    "profit_total": results.get('backtest_summary', {}).get('total_return_pct', 0) / 100,
+                    "profit_total_abs": results.get('backtest_summary', {}).get('total_pnl', 0),
                     "backtest_start": start_date.strftime("%Y-%m-%d %H:%M:%S+00:00"),
                     "backtest_end": end_date.strftime("%Y-%m-%d %H:%M:%S+00:00"),
                     "backtest_days": (end_date - start_date).days,
-                    "starting_balance": results['backtest_summary']['initial_balance'],
-                    "final_balance": results['backtest_summary']['final_balance'],
+                    "starting_balance": results.get('backtest_summary', {}).get('initial_balance', self.portfolio.initial_balance),
+                    "final_balance": results.get('backtest_summary', {}).get('final_balance', self.portfolio.available_balance),
                     "max_open_trades": 15,
                     "timeframe": "5m",
                     "strategy_name": "SafeBullRiderStrategy",
@@ -1003,11 +1087,11 @@ class SafeRealisticBacktester(TickBacktester):
                         "300": 0.015,
                         "600": 0.008
                     },
-                    "wins": results['trade_analysis']['winning_trades'],
-                    "losses": results['trade_analysis']['losing_trades'],
-                    "winrate": results['backtest_summary']['win_rate_pct'] / 100,
-                    "expectancy": results['trade_analysis']['avg_trade_pnl'] if 'avg_trade_pnl' in results['trade_analysis'] else 0,
-                    "max_drawdown": results['backtest_summary']['max_drawdown_pct'] / 100 if 'max_drawdown_pct' in results['backtest_summary'] else 0,
+                    "wins": results.get('trade_analysis', {}).get('winning_trades', 0),
+                    "losses": results.get('trade_analysis', {}).get('losing_trades', 0),
+                    "winrate": results.get('backtest_summary', {}).get('win_rate_pct', 0) / 100,
+                    "expectancy": results.get('trade_analysis', {}).get('avg_trade_pnl', 0),
+                    "max_drawdown": results.get('backtest_summary', {}).get('max_drawdown_pct', 0) / 100,
                 }
             }
         }
@@ -1110,6 +1194,56 @@ class SafeRealisticBacktester(TickBacktester):
         logger.info(f"📊 Detailed CSV analysis exported to {csv_filepath}")
         
         return filepath
+    
+    def generate_custom_results(self):
+        """Generate results structure for SafeBullRider backtest"""
+        total_trades = len(self.portfolio.closed_trades)
+        final_balance = self.calculate_total_portfolio_value()
+        
+        if total_trades > 0:
+            winning_trades = len([t for t in self.portfolio.closed_trades if t.is_winner])
+            losing_trades = total_trades - winning_trades
+            win_rate = (winning_trades / total_trades) * 100
+            
+            total_pnl = sum(t.pnl for t in self.portfolio.closed_trades)
+            avg_trade_pnl = total_pnl / total_trades
+            max_win = max((t.pnl for t in self.portfolio.closed_trades), default=0)
+            max_loss = min((t.pnl for t in self.portfolio.closed_trades), default=0)
+            
+            # Calculate profit factor
+            gross_profit = sum(t.pnl for t in self.portfolio.closed_trades if t.is_winner)
+            gross_loss = abs(sum(t.pnl for t in self.portfolio.closed_trades if not t.is_winner))
+            profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
+            
+            total_return_pct = ((final_balance - self.portfolio.initial_balance) / self.portfolio.initial_balance) * 100
+        else:
+            winning_trades = losing_trades = 0
+            win_rate = 0
+            total_pnl = avg_trade_pnl = max_win = max_loss = profit_factor = total_return_pct = 0
+        
+        # Calculate drawdown stats
+        drawdown_stats = self.calculate_drawdown_stats()
+        
+        return {
+            'backtest_summary': {
+                'initial_balance': self.portfolio.initial_balance,
+                'final_balance': final_balance,
+                'total_trades': total_trades,
+                'total_pnl': total_pnl,
+                'total_return_pct': total_return_pct,
+                'win_rate_pct': win_rate,
+                'max_drawdown_pct': drawdown_stats['max_drawdown_pct'],
+                'max_drawdown_usd': drawdown_stats['max_drawdown_usd']
+            },
+            'trade_analysis': {
+                'winning_trades': winning_trades,
+                'losing_trades': losing_trades,
+                'avg_trade_pnl': avg_trade_pnl,
+                'max_win': max_win,
+                'max_loss': max_loss,
+                'profit_factor': profit_factor
+            }
+        }
 
 def detect_available_date_range():
     """Detect available date range across all pairs"""
@@ -1153,19 +1287,92 @@ def main():
                         help="End date (YYYY-MM-DD). Default: use all available data")
     parser.add_argument("--recent", action="store_true",
                         help="Test recent 3 months instead of full dataset")
+    parser.add_argument("--week", action="store_true",
+                        help="Test last 7 days only")
+    parser.add_argument("--month", action="store_true",
+                        help="Test last 30 days only")
+    parser.add_argument("--year", type=int, default=None,
+                        help="Test specific calendar year (e.g., --year 2023) or use --year 0 for last 365 days")
+    parser.add_argument("--today", action="store_true",
+                        help="Test today only (if data available)")
+    parser.add_argument("--yesterday", action="store_true",
+                        help="Test yesterday only")
+    parser.add_argument("--days", type=int, default=None,
+                        help="Test last N days (e.g., --days 14 for 2 weeks)")
     parser.add_argument("--balance", type=float, default=2000,
                         help="Starting balance (default: 2000)")
+    parser.add_argument("--pairs", type=str, default=None,
+                        help="Test specific pairs (e.g., --pairs BTCUSDT,ETHUSDT or --pairs BTCUSDT)")
     
     args = parser.parse_args()
+    
+    # Handle custom pairs selection
+    custom_pairs = None
+    if args.pairs:
+        # Split by comma and clean up
+        custom_pairs = [pair.strip().upper() for pair in args.pairs.split(',')]
+        # Validate pairs
+        valid_pairs = [
+            "BTCUSDT", "ETHUSDT", "DOGEUSDT", "ADAUSDT", "XRPUSDT",
+            "SOLUSDT", "AVAXUSDT", "LINKUSDT", "BNBUSDT", "BCHUSDT",
+            "TIAUSDT", "DOTUSDT", "POLUSDT", "UNIUSDT"
+        ]
+        invalid_pairs = [pair for pair in custom_pairs if pair not in valid_pairs]
+        if invalid_pairs:
+            print(f"❌ Invalid pairs: {', '.join(invalid_pairs)}")
+            print(f"✅ Valid pairs: {', '.join(valid_pairs)}")
+            return
+        print(f"🎯 Testing custom pairs: {', '.join(custom_pairs)} ({len(custom_pairs)} total)")
     
     # Determine date range
     if args.start and args.end:
         start_date = datetime.strptime(args.start, "%Y-%m-%d").date()
         end_date = datetime.strptime(args.end, "%Y-%m-%d").date()
+    elif args.today:
+        # Test today only
+        end_date = datetime.now().date()
+        start_date = end_date
+        print(f"📅 Testing today only: {start_date}")
+    elif args.yesterday:
+        # Test yesterday only
+        end_date = datetime.now().date() - timedelta(days=1)
+        start_date = end_date
+        print(f"📅 Testing yesterday only: {start_date}")
+    elif args.days:
+        # Test last N days
+        end_date = datetime.now().date() - timedelta(days=1)
+        start_date = end_date - timedelta(days=args.days - 1)
+        print(f"📅 Testing last {args.days} days: {start_date} to {end_date}")
+    elif args.week:
+        # Test last 7 days
+        end_date = datetime.now().date() - timedelta(days=1)
+        start_date = end_date - timedelta(days=6)
+        print(f"📅 Testing last week (7 days): {start_date} to {end_date}")
+    elif args.month:
+        # Test last 30 days
+        end_date = datetime.now().date() - timedelta(days=1)
+        start_date = end_date - timedelta(days=29)
+        print(f"📅 Testing last month (30 days): {start_date} to {end_date}")
+    elif args.year is not None:
+        if args.year == 0:
+            # Test last 365 days (backward compatibility)
+            end_date = datetime.now().date() - timedelta(days=1)
+            start_date = end_date - timedelta(days=364)
+            print(f"📅 Testing last year (365 days): {start_date} to {end_date}")
+        else:
+            # Test specific calendar year
+            if args.year < 2020 or args.year > 2030:
+                print(f"❌ Invalid year: {args.year}. Must be between 2020-2030")
+                return
+            start_date = datetime(args.year, 1, 1).date()
+            end_date = datetime(args.year, 12, 31).date()
+            print(f"📅 Testing calendar year {args.year}: {start_date} to {end_date}")
     elif args.recent:
+        # Test last 3 months (90 days)
         if available_end:
             end_date = available_end
-            start_date = end_date - timedelta(days=90)
+            start_date = max(available_start, end_date - timedelta(days=90))
+            print(f"📅 Testing recent period (90 days): {start_date} to {end_date}")
         else:
             print("❌ No tick data found!")
             return
@@ -1203,6 +1410,9 @@ def main():
     print()
     
     backtester = SafeRealisticBacktester()
+    # Set custom pairs if specified
+    if custom_pairs:
+        backtester.trading_pairs = custom_pairs
     # Set custom starting balance
     backtester.portfolio.initial_balance = args.balance
     backtester.portfolio.available_balance = args.balance
@@ -1212,19 +1422,34 @@ def main():
         results = backtester.run_realistic_backtest(start_date, end_date)
         
         # Display results
-        summary = results['backtest_summary']
-        trade_analysis = results['trade_analysis']
+        summary = results.get('backtest_summary', {})
+        trade_analysis = results.get('trade_analysis', {})
         
         print("\\n🎯 SAFEBULLRIDER MULTI-PAIR BACKTEST RESULTS")
         print("=" * 60)
-        print(f"Final Balance:    ${summary['final_balance']:,.2f}")
-        print(f"Total Return:     {summary['total_return_pct']:+.2f}%")
-        print(f"Total P&L:        ${summary['total_pnl']:+.2f}")
-        print(f"Total Trades:     {summary['total_trades']}")
-        print(f"Win Rate:         {summary['win_rate_pct']:.1f}%")
+        print(f"Final Balance:    ${summary.get('final_balance', 0):,.2f}")
+        print(f"Total Return:     {summary.get('total_return_pct', 0):+.2f}%")
+        print(f"Total P&L:        ${summary.get('total_pnl', 0):+.2f}")
+        print(f"Total Trades:     {summary.get('total_trades', 0)}")
+        print(f"Win Rate:         {summary.get('win_rate_pct', 0):.1f}%")
+        
+        # Calculate and display gross profit/loss
+        gross_profit = 0
+        gross_loss = 0
+        for trade in backtester.portfolio.closed_trades:
+            # Calculate gross P&L (before fees)
+            gross_pnl = (trade.exit_price - trade.entry_price) * trade.quantity
+            if gross_pnl > 0:
+                gross_profit += gross_pnl
+            else:
+                gross_loss += abs(gross_pnl)
+        
+        print(f"Gross Profit:     ${gross_profit:,.2f} (sum of all winning trades before fees)")
+        print(f"Gross Loss:       ${gross_loss:,.2f} (sum of all losing trades before fees)")
+        print(f"Profit/Loss Ratio: {gross_profit/gross_loss:.2f}" if gross_loss > 0 else "Profit/Loss Ratio: N/A")
         
         # Enhanced metrics with quality indicators
-        if summary['total_trades'] > 0:
+        if summary.get('total_trades', 0) > 0:
             # Profit Factor with quality indicator
             profit_factor = trade_analysis.get('profit_factor', 0)
             if profit_factor >= 2.0:
@@ -1238,25 +1463,41 @@ def main():
             
             print(f"Profit Factor:    {profit_factor:.2f} {pf_indicator}")
             
-            # Calculate portfolio Sharpe ratio
-            if len(backtester.balance_history) > 1:
+            # FIXED: Calculate portfolio Sharpe ratio using DAILY returns
+            if len(backtester.daily_balance_snapshots) > 1:
                 import numpy as np
-                balance_values = [entry['balance'] for entry in backtester.balance_history]
-                returns = np.diff(balance_values) / balance_values[:-1]
-                returns_mean = np.mean(returns)
-                returns_std = np.std(returns, ddof=1) if len(returns) > 1 else 0
                 
-                # Annualized Sharpe ratio (using daily returns)
-                # We track balance changes per trade, estimate ~20 trades per day
-                days_in_period = (end_date - start_date).days + 1
-                trades_per_day = len(returns) / days_in_period if days_in_period > 0 else 1
-                periods_per_year = 365 * trades_per_day  # Trades per year
+                # Get daily closing balances (last balance of each day)
+                daily_balances = []
+                dates = sorted(backtester.daily_balance_snapshots.keys())
+                for date in dates:
+                    if backtester.daily_balance_snapshots[date]:
+                        # Use last balance of the day
+                        daily_balances.append(backtester.daily_balance_snapshots[date][-1])
                 
-                # Calculate annualized Sharpe
-                if returns_std > 0 and periods_per_year > 0:
-                    annualized_return = returns_mean * periods_per_year
-                    annualized_volatility = returns_std * np.sqrt(periods_per_year)
-                    sharpe_ratio = annualized_return / annualized_volatility
+                if len(daily_balances) > 1:
+                    # Calculate daily returns
+                    daily_returns = np.diff(daily_balances) / daily_balances[:-1]
+                    
+                    # Remove any NaN or infinite values
+                    daily_returns = daily_returns[np.isfinite(daily_returns)]
+                    
+                    if len(daily_returns) > 0:
+                        # Calculate mean and std of daily returns
+                        daily_mean = np.mean(daily_returns)
+                        daily_std = np.std(daily_returns, ddof=1) if len(daily_returns) > 1 else 0
+                        
+                        # NON-ANNUALIZED Sharpe ratio - just for the actual backtest period
+                        # This gives you the actual risk-adjusted return for your test period
+                        if daily_std > 0:
+                            # Simple Sharpe: mean return / volatility for the period
+                            sharpe_ratio = daily_mean / daily_std
+                            # Scale by sqrt of number of days to normalize
+                            sharpe_ratio = sharpe_ratio * np.sqrt(len(daily_returns))
+                        else:
+                            sharpe_ratio = 0
+                    else:
+                        sharpe_ratio = 0
                 else:
                     sharpe_ratio = 0
                 
@@ -1264,6 +1505,8 @@ def main():
                 if sharpe_ratio > 5:
                     logger.warning(f"⚠️  Sharpe ratio {sharpe_ratio:.2f} seems unrealistic - check calculation")
                 
+                # Adjusted thresholds for non-annualized Sharpe
+                days_in_test = len(daily_returns)
                 if sharpe_ratio >= 2.0:
                     sharpe_indicator = "✅ Excellent"
                 elif sharpe_ratio >= 1.0:
@@ -1273,31 +1516,52 @@ def main():
                 else:
                     sharpe_indicator = "❌ Poor"
                 
-                print(f"Sharpe Ratio:     {sharpe_ratio:.2f} {sharpe_indicator}")
+                print(f"Sharpe Ratio:     {sharpe_ratio:.2f} ({days_in_test} days) {sharpe_indicator}")
             
             # Max Drawdown with better formatting
-            if 'max_drawdown_pct' in summary:
-                dd_pct = summary['max_drawdown_pct']
-                if dd_pct <= 5.0:
-                    dd_indicator = "✅ Low Risk"
-                elif dd_pct <= 10.0:
-                    dd_indicator = "⚠️  Moderate Risk"
-                elif dd_pct <= 20.0:
-                    dd_indicator = "❌ High Risk"
-                else:
-                    dd_indicator = "🚨 Extreme Risk"
-                
-                print(f"Max Drawdown:     {dd_pct:.2f}% (${summary['max_drawdown_usd']:.2f}) {dd_indicator}")
+            dd_pct = summary.get('max_drawdown_pct', 0)
+            if dd_pct <= 5.0:
+                dd_indicator = "✅ Low Risk"
+            elif dd_pct <= 10.0:
+                dd_indicator = "⚠️  Moderate Risk"
+            elif dd_pct <= 20.0:
+                dd_indicator = "❌ High Risk"
+            else:
+                dd_indicator = "🚨 Extreme Risk"
+            
+            print(f"Max Drawdown:     {dd_pct:.2f}% (${summary.get('max_drawdown_usd', 0):.2f}) {dd_indicator}")
         
-            print(f"Avg Trade:        ${trade_analysis['avg_trade_pnl']:+.2f}")
-            print(f"Best Trade:       ${trade_analysis['max_win']:+.2f}")
-            print(f"Worst Trade:      ${trade_analysis['max_loss']:+.2f}")
+            print(f"Avg Trade:        ${trade_analysis.get('avg_trade_pnl', 0):+.2f}")
+            print(f"Best Trade:       ${trade_analysis.get('max_win', 0):+.2f}")
+            print(f"Worst Trade:      ${trade_analysis.get('max_loss', 0):+.2f}")
             
             # Add warnings for poor performance
             if profit_factor < 1.0:
                 print(f"⚠️  WARNING: Poor Profit Factor: {profit_factor:.2f} (<1.0 = losing strategy)")
-            if 'max_drawdown_pct' in summary and summary['max_drawdown_pct'] > 15:
-                print(f"⚠️  WARNING: High drawdown: {summary['max_drawdown_pct']:.1f}% (>15% = high risk)")
+            if dd_pct > 15:
+                print(f"⚠️  WARNING: High drawdown: {dd_pct:.1f}% (>15% = high risk)")
+        
+        # Show sample trades with dates
+        if len(backtester.portfolio.closed_trades) > 0:
+            print("\\n📅 TRADE TIMELINE SAMPLE:")
+            trades_to_show = min(5, len(backtester.portfolio.closed_trades))
+            
+            # Show first few trades
+            print("  First trades:")
+            for i in range(trades_to_show):
+                trade = backtester.portfolio.closed_trades[i]
+                indicator = "🟢" if trade.is_winner else "🔴"
+                print(f"    {indicator} {trade.entry_time.strftime('%Y-%m-%d %H:%M')} | {trade.symbol} | "
+                      f"P&L: ${trade.pnl:+.2f} ({trade.pnl_pct*100:+.1f}%) | Duration: {trade.duration_minutes/60:.1f}h")
+            
+            # Show last few trades if we have more than 10 total
+            if len(backtester.portfolio.closed_trades) > 10:
+                print("  Last trades:")
+                for i in range(-trades_to_show, 0):
+                    trade = backtester.portfolio.closed_trades[i]
+                    indicator = "🟢" if trade.is_winner else "🔴"
+                    print(f"    {indicator} {trade.entry_time.strftime('%Y-%m-%d %H:%M')} | {trade.symbol} | "
+                          f"P&L: ${trade.pnl:+.2f} ({trade.pnl_pct*100:+.1f}%) | Duration: {trade.duration_minutes/60:.1f}h")
         
         print("\\n📊 PORTFOLIO BREAKDOWN:")
         pair_results = {}

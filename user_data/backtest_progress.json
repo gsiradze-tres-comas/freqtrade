@@ -1,13 +1,13 @@
 {
-  "start_time": "2025-08-19T22:47:53.760963",
-  "total_days": 372,
-  "current_day": 372,
-  "current_date": "2025-08-17",
+  "start_time": "2025-08-24T00:48:36.036080",
+  "total_days": 365,
+  "current_day": 365,
+  "current_date": "2022-12-31",
   "progress_pct": 100.0,
-  "estimated_completion": "2025-08-20 00:54:45",
-  "current_balance": 6658.272110028906,
-  "total_trades": 7549,
+  "estimated_completion": "2025-08-24 02:06:22",
+  "current_balance": 83.74018347408969,
+  "total_trades": 4716,
   "pairs_processed": 0,
   "status": "completed",
-  "completion_time": "2025-08-20T00:54:47.166246"
+  "completion_time": "2025-08-24T02:06:22.745932"
 }

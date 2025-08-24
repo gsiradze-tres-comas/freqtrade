@@ -139,6 +139,7 @@ mcp_servers.json
 mcp_servers.json.env
 user_data/tick_data/     # Large tick data files
 user_data/visualization_results/
+user_data/tick_data/
 *.pid
 test_*.py
 
