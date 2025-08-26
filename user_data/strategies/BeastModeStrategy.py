@@ -16,7 +16,7 @@ from functools import reduce
 
 logger = logging.getLogger(__name__)
 
-class BeastModeStrategyV3(IStrategy):
+class BeastModeStrategy(IStrategy):
     """
     SafeBullRider but BETTER - focus on quality over quantity
     """

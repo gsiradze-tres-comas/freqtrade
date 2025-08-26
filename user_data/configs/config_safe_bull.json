@@ -58,9 +58,7 @@
             "BCH/USDT:USDT",
             "TIA/USDT:USDT"
         ],
-        "pair_blacklist": [
-            "BNB/.*"
-        ]
+        "pair_blacklist": []
     },
     "pairlists": [
         {
@@ -89,7 +87,7 @@
     "api_server": {
         "enabled": true,
         "listen_ip_address": "127.0.0.1",
-        "listen_port": 8081,
+        "listen_port": 8080,
         "verbosity": "error",
         "enable_openapi": false,
         "jwt_secret_key": "9e2f6a3c8b5d1e4f7a2c6b9d3e6f9a3c8b5d1e4f7a2c6b9d3e6f9a3c8b5d1e4f",
@@ -101,7 +99,7 @@
     "bot_name": "SafeBullRider",
     "initial_state": "running",
     "force_entry_enable": false,
-    "strategy": "SafeBullRiderStrategy",
+    "strategy": "BeastModeStrategy",
     "internals": {
         "process_throttle_secs": 3
     },

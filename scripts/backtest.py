@@ -191,12 +191,12 @@ sys.modules['freqtrade.persistence.pairlock'] = mock_pairlock
 sys.modules['freqtrade.persistence.models'] = mock_models
 sys.modules['freqtrade.persistence'] = mock_persistence
 
-from tick_backtester import TickBacktester, Trade, Portfolio
+from tick_data.tick_backtester import TickBacktester, Trade, Portfolio
 
 # Import strategy components we need
 import importlib.util
-strategy_path = project_root / 'user_data' / 'strategies' / 'BeastModeStrategyV3.py'
-spec = importlib.util.spec_from_file_location("BeastModeStrategyV3", strategy_path)
+strategy_path = project_root / 'user_data' / 'strategies' / 'BeastModeStrategy.py'
+spec = importlib.util.spec_from_file_location("BeastModeStrategy", strategy_path)
 strategy_module = importlib.util.module_from_spec(spec)
 
 # Mock the Trade class in the strategy module's namespace
@@ -259,19 +259,19 @@ persistence_module = setup_full_persistence_mocking()
 # Execute the strategy module with our mocks in place
 try:
     spec.loader.exec_module(strategy_module)
-    BeastModeStrategyV3 = strategy_module.BeastModeStrategyV3
+    BeastModeStrategy = strategy_module.BeastModeStrategy
     
     # CRITICAL: Monkey patch the imported Trade in the strategy module
     strategy_module.Trade = CompleteMockTrade
     
     # Also patch any attributes that might have cached the Trade reference
-    if hasattr(BeastModeStrategyV3, 'Trade'):
-        BeastModeStrategyV3.Trade = CompleteMockTrade
+    if hasattr(BeastModeStrategy, 'Trade'):
+        BeastModeStrategy.Trade = CompleteMockTrade
         
 except Exception as e:
     logger.error(f"Failed to load strategy: {e}")
     # Fallback: create a simple mock strategy
-    class BeastModeStrategyV3:
+    class BeastModeStrategy:
         def __init__(self, config):
             self.minimal_roi = {"0": 0.04}
             self.stoploss = -0.04
@@ -324,7 +324,7 @@ class FastMultiPairBacktester(TickBacktester):
             'tradable_balance_ratio': 0.99,
             'timeframe': '5m'
         }
-        self.strategy = BeastModeStrategyV3(mock_config)
+        self.strategy = BeastModeStrategy(mock_config)
         
         # Create comprehensive mock Freqtrade environment for strategy
         class MockDataProvider:
