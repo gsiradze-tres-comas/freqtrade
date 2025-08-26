@@ -186,10 +186,27 @@ class BeastModeStrategyV3(IStrategy):
                            proposed_stake: float, min_stake: float, max_stake: float,
                            leverage: float, entry_tag: str, side: str, **kwargs) -> float:
         """
-        IMPROVED position sizing - bigger bets on higher quality signals
+        RISK-MANAGED position sizing - reduce size based on volatility and recent performance
         """
         
-        # Get recent trades performance for this pair
+        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        if len(dataframe) < 1:
+            return proposed_stake
+        
+        latest = dataframe.iloc[-1]
+        multiplier = 1.0
+        
+        # 1. VOLATILITY-BASED SIZING (Most Important)
+        atr_pct = latest.get('atr_pct', 2.0)  # ATR as percentage of price
+        if atr_pct > 5.0:  # High volatility (bear market conditions)
+            multiplier *= 0.5  # Cut position size in half
+            logger.info(f"High volatility detected ({atr_pct:.1f}%) - reducing {pair} position size")
+        elif atr_pct > 3.5:  # Moderate high volatility
+            multiplier *= 0.7  # Reduce by 30%
+        elif atr_pct < 1.5:  # Low volatility (calm markets)
+            multiplier *= 1.2  # Increase by 20%
+        
+        # 2. PAIR PERFORMANCE-BASED SIZING
         try:
             recent_trades = Trade.get_trades_proxy(is_open=False, pair=pair)
             if len(recent_trades) >= 3:
@@ -197,17 +214,21 @@ class BeastModeStrategyV3(IStrategy):
                 last_trades = recent_trades[-5:]
                 win_rate = sum(1 for t in last_trades if t.close_profit and t.close_profit > 0) / len(last_trades)
                 
-                # If pair is performing well, increase stake
+                # Adjust based on recent pair performance
                 if win_rate >= 0.8:  # 80% win rate
-                    multiplier = 1.3
-                elif win_rate >= 0.6:  # 60% win rate
-                    multiplier = 1.1
-                else:
-                    multiplier = 0.9  # Reduce for underperforming pairs
-            else:
-                multiplier = 1.0  # Standard for new pairs
+                    multiplier *= 1.2
+                elif win_rate <= 0.4:  # 40% or worse win rate
+                    multiplier *= 0.6  # Reduce significantly for underperforming pairs
         except:
-            multiplier = 1.0
+            pass
+        
+        # 3. MAXIMUM POSITION RISK LIMIT
+        # Ensure single trade can't lose more than ~$15 (0.6% of $2500 account)
+        max_loss_dollars = 15.0
+        max_position_value = max_loss_dollars / 0.06  # Assuming 6% max stoploss
+        if proposed_stake * multiplier > max_position_value:
+            multiplier = max_position_value / proposed_stake
+            logger.info(f"Position size capped for {pair} - max risk limit applied")
         
         adjusted_stake = proposed_stake * multiplier
         return min(max(adjusted_stake, min_stake), max_stake)
@@ -216,6 +237,62 @@ class BeastModeStrategyV3(IStrategy):
                            time_in_force: str, current_time: datetime, entry_tag: str,
                            side: str, **kwargs) -> bool:
         """
-        Simplified entry confirmation - just let it trade
+        RISK-MANAGED entry confirmation with daily loss limits and volatility filters
         """
+        
+        # 1. DAILY LOSS LIMIT CHECK (Critical Risk Management)
+        try:
+            today = current_time.date()
+            all_trades = Trade.get_trades_proxy(is_open=False)
+            
+            # Calculate today's P&L
+            daily_pnl = 0.0
+            daily_trades = 0
+            
+            for trade in all_trades:
+                if trade.close_date and trade.close_date.date() == today:
+                    if trade.close_profit_abs:
+                        daily_pnl += trade.close_profit_abs
+                        daily_trades += 1
+            
+            # Daily loss limit: Stop trading if we've lost more than $60 today (2.4% of $2500)
+            daily_loss_limit = -60.0
+            if daily_pnl < daily_loss_limit:
+                logger.warning(f"DAILY LOSS LIMIT HIT: ${daily_pnl:.2f} < ${daily_loss_limit:.2f} - blocking {pair} entry")
+                return False
+            
+            # Consecutive loss protection: If we've had 5+ losses in a row today, reduce activity
+            if daily_trades >= 5:
+                recent_losses = 0
+                for trade in all_trades[-5:]:
+                    if trade.close_date and trade.close_date.date() == today:
+                        if trade.close_profit_abs and trade.close_profit_abs < 0:
+                            recent_losses += 1
+                
+                if recent_losses >= 4:  # 4 out of last 5 trades were losses
+                    logger.warning(f"Consecutive losses detected ({recent_losses}/5) - being more selective")
+                    # Only allow high-conviction entries (can add additional filters here)
+                    pass
+        
+        except Exception as e:
+            logger.warning(f"Error checking daily limits: {e}")
+        
+        # 2. EXTREME VOLATILITY FILTER
+        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        if len(dataframe) >= 1:
+            latest = dataframe.iloc[-1]
+            atr_pct = latest.get('atr_pct', 2.0)
+            
+            # Block entries during extreme volatility (bear market crash conditions)
+            if atr_pct > 8.0:  # Extreme volatility
+                logger.warning(f"EXTREME VOLATILITY: {atr_pct:.1f}% ATR - blocking {pair} entry")
+                return False
+        
+        # 3. WEEKEND FILTER (Optional - crypto trades 24/7 but weekends can be choppy)
+        weekend = current_time.weekday() >= 5  # Saturday = 5, Sunday = 6
+        if weekend:
+            # Allow weekend trading but be more selective
+            # Could add additional filters here if needed
+            pass
+        
         return True

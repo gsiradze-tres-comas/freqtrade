@@ -931,8 +931,15 @@ class FastMultiPairBacktester(TickBacktester):
                 current_drawdown = (peak_balance - balance) / peak_balance
                 max_drawdown = max(max_drawdown, current_drawdown)
         
-        # Commission calculation (0.1% per trade, both entry and exit)
-        commission = total_trades * 2 * 0.001 * (self.portfolio.initial_balance / total_trades) if total_trades > 0 else 0.0
+        # Commission calculation (0.1% per trade, both entry and exit) 
+        # Calculate based on actual trade values, not just initial balance
+        total_trade_value = 0
+        for trade in self.portfolio.closed_trades:
+            entry_value = trade.entry_price * trade.quantity
+            exit_value = trade.exit_price * trade.quantity
+            total_trade_value += entry_value + exit_value  # Both entry and exit fees
+        
+        commission = total_trade_value * 0.001  # 0.1% on total traded value
         
         # Average trade duration (simplified - assume all trades are similar duration)
         avg_duration = 0.5  # Default to 0.5 days average
