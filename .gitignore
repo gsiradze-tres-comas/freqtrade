@@ -10,6 +10,7 @@ logfile.txt
 user_data/logs/
 user_data/backtest_results/
 user_data/data/
+user_data/candles/
 user_data/hyperopts/
 user_data/notebooks/
 user_data/freqaimodels/
