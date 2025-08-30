@@ -416,8 +416,12 @@ class BeastModeStrategy(IStrategy):
             dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
             if len(dataframe) >= 1:
                 latest = dataframe.iloc[-1]
-                # Require stronger conditions during risky hours
-                if latest.get('rsi', 50) > 60 or latest.get('crash_warning', 0) > 0:
+                # Require stronger conditions during risky hours (conditional)
+                bull_market = latest.get('bull_market', 0)
+                rsi_threshold = 70 if bull_market else 60  # More lenient in bull markets
+                warning_threshold = 2 if bull_market else 0  # Allow some warnings in bull
+                
+                if latest.get('rsi', 50) > rsi_threshold or latest.get('crash_warning', 0) > warning_threshold:
                     logger.warning(f"Blocking {pair} entry during risky hour with weak conditions")
                     return False
         
