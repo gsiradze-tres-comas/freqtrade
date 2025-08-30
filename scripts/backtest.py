@@ -116,6 +116,9 @@ class CompleteMockTrade:
         self.timeframe = kwargs.get('timeframe', 5)
         self.trading_mode = kwargs.get('trading_mode')
         
+        # Fix for custom_stoploss compatibility
+        self.open_date = kwargs.get('open_date', self.open_date)
+        
     @staticmethod
     def _update_trades_cache(historical_trades, current_time):
         """Internal method called by backtester to update trade cache"""
@@ -662,10 +665,11 @@ class FastMultiPairBacktester(TickBacktester):
                         current_profit = (historical_price - trade.entry_price) / trade.entry_price
                         
                         class MockTrade:
-                            def __init__(self, entry_price):
+                            def __init__(self, entry_price, entry_time):
                                 self.open_rate = entry_price
+                                self.open_date = entry_time
                         
-                        mock_trade = MockTrade(trade.entry_price)
+                        mock_trade = MockTrade(trade.entry_price, trade.entry_time)
                         
                         # Check strategy exits
                         strategy_exit_reason = self.strategy.custom_exit(

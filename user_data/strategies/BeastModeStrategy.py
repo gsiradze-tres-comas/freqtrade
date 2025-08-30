@@ -35,8 +35,8 @@ class BeastModeStrategy(IStrategy):
         "600": 0.008
     }
     
-    # SAME SafeBullRider stops - THIS WORKS
-    stoploss = -0.06
+    # Dynamic stops based on market conditions
+    stoploss = -0.06  # Default stop loss
     trailing_stop = True
     trailing_stop_positive = 0.015
     trailing_stop_positive_offset = 0.02
@@ -58,7 +58,7 @@ class BeastModeStrategy(IStrategy):
     trend_consistency = IntParameter(3, 8, default=5, space="buy")
     
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        """SAME SafeBullRider indicators + quality filters"""
+        """Enhanced indicators with crash protection"""
         
         # EXACT SafeBullRider indicators
         dataframe['ema_8'] = ta.EMA(dataframe, timeperiod=8)
@@ -74,6 +74,7 @@ class BeastModeStrategy(IStrategy):
         # Momentum
         dataframe['momentum_5'] = (dataframe['close'] - dataframe['close'].shift(5)) / dataframe['close'].shift(5)
         dataframe['momentum_20'] = (dataframe['close'] - dataframe['close'].shift(20)) / dataframe['close'].shift(20)
+        dataframe['momentum_1h'] = (dataframe['close'] - dataframe['close'].shift(12)) / dataframe['close'].shift(12)  # 1 hour momentum
         
         # Trend detection
         dataframe['uptrend'] = (
@@ -87,6 +88,56 @@ class BeastModeStrategy(IStrategy):
         # Volatility
         dataframe['atr'] = ta.ATR(dataframe, timeperiod=14)
         dataframe['atr_pct'] = (dataframe['atr'] / dataframe['close']) * 100
+        
+        # ============ CRASH PROTECTION INDICATORS ============
+        
+        # 1. BEARISH DIVERGENCE DETECTION
+        # Find local highs for divergence analysis
+        dataframe['price_high_20'] = dataframe['high'].rolling(20).max()
+        dataframe['rsi_high_20'] = dataframe['rsi'].rolling(20).max()
+        
+        # Bearish divergence: price makes higher high but RSI makes lower high
+        dataframe['bearish_divergence'] = (
+            (dataframe['high'] > dataframe['high'].shift(20)) &  # Higher high in price
+            (dataframe['rsi'] < dataframe['rsi'].shift(20)) &     # Lower high in RSI
+            (dataframe['rsi'] > 65)                                # In overbought territory
+        ).astype(int)
+        
+        # 2. VOLUME EXHAUSTION ANALYSIS
+        dataframe['volume_trend'] = dataframe['volume'].rolling(10).mean() / dataframe['volume'].rolling(30).mean()
+        dataframe['volume_exhaustion'] = (
+            (dataframe['close'] > dataframe['close'].shift(5)) &   # Price going up
+            (dataframe['volume'] < dataframe['volume'].shift(5)) &  # But volume declining
+            (dataframe['volume_ratio'] < 0.8)                       # Below average volume
+        ).astype(int)
+        
+        # 3. RESISTANCE DETECTION
+        dataframe['resistance_level'] = dataframe['high'].rolling(50).max()
+        dataframe['near_resistance'] = (
+            (dataframe['high'] >= dataframe['resistance_level'] * 0.99) &  # Near resistance
+            (dataframe['close'] < dataframe['resistance_level'] * 0.98)     # But closed below
+        ).astype(int)
+        
+        # Count failed breakout attempts
+        dataframe['failed_breaks'] = dataframe['near_resistance'].rolling(10).sum()
+        
+        # 4. MARKET STRUCTURE ANALYSIS
+        # Detect lower highs and lower lows (trend reversal)
+        dataframe['lower_high'] = (
+            (dataframe['high'] < dataframe['high'].shift(10)) &
+            (dataframe['high'].shift(10) < dataframe['high'].shift(20))
+        ).astype(int)
+        
+        dataframe['lower_low'] = (
+            (dataframe['low'] < dataframe['low'].shift(10)) &
+            (dataframe['low'].shift(10) < dataframe['low'].shift(20))
+        ).astype(int)
+        
+        # 5. PARABOLIC MOVE DETECTION
+        dataframe['parabolic_move'] = (
+            (dataframe['momentum_1h'] > 0.03) &  # 3%+ move in 1 hour
+            (dataframe['rsi'] > 70)               # With overbought RSI
+        ).astype(int)
         
         # NEW quality indicators
         
@@ -117,11 +168,24 @@ class BeastModeStrategy(IStrategy):
              (dataframe['rsi'] > 50).astype(int)) / 4
         )
         
+        # 6. CRASH WARNING SIGNALS
+        # Combine multiple warning signals
+        dataframe['crash_warning'] = (
+            dataframe['bearish_divergence'] +
+            dataframe['volume_exhaustion'] +
+            (dataframe['failed_breaks'] >= 3).astype(int) +
+            (dataframe['lower_high'] & dataframe['lower_low']).astype(int) +
+            dataframe['parabolic_move']
+        )
+        
+        # Critical level: 3+ warning signals
+        dataframe['high_risk'] = (dataframe['crash_warning'] >= 3).astype(int)
+        
         return dataframe
     
     def populate_entry_trend(self, dataframe: DataFrame, metadata: Dict) -> DataFrame:
         """
-        SAME SafeBullRider patterns + quality filters
+        Enhanced entry with crash protection filters
         """
         
         # SIMPLIFIED Try1BullRider patterns - the ones that actually work
@@ -149,7 +213,20 @@ class BeastModeStrategy(IStrategy):
         )
         
         # Combine all patterns with OR logic (more opportunities)
-        final_entry = long_dip_buy | long_breakout | long_trend_follow
+        basic_entry = long_dip_buy | long_breakout | long_trend_follow
+        
+        # ============ CRASH PROTECTION FILTERS ============
+        # Block entries when crash risk is high
+        safe_to_enter = (
+            (dataframe['high_risk'] == 0) &              # No high risk signals
+            (dataframe['parabolic_move'] == 0) &         # Not after parabolic moves
+            (dataframe['bearish_divergence'] == 0) &     # No bearish divergence
+            (dataframe['failed_breaks'] < 3) &           # Less than 3 failed breakouts
+            (dataframe['momentum_1h'] > -0.02)           # No sharp drops in last hour
+        )
+        
+        # Final entry = basic patterns AND safety checks
+        final_entry = basic_entry & safe_to_enter
         
         # Initialize columns if they don't exist
         dataframe['enter_long'] = 0
@@ -161,10 +238,10 @@ class BeastModeStrategy(IStrategy):
         return dataframe
     
     def populate_exit_trend(self, dataframe: DataFrame, metadata: Dict) -> DataFrame:
-        """EXACT SafeBullRider exit logic"""
+        """Enhanced exit logic with early warning signals"""
         
-        # Only exit on EXTREME trend reversal
-        long_exit = (
+        # Original SafeBullRider exits
+        original_exit = (
             (dataframe['rsi'] > 85) |
             (
                 (dataframe['momentum_5'] < -0.02) &
@@ -172,6 +249,20 @@ class BeastModeStrategy(IStrategy):
                 (dataframe['close'] < dataframe['ema_8'])
             )
         )
+        
+        # ============ EARLY WARNING EXITS ============
+        # Exit on crash warning signals
+        crash_protection_exit = (
+            (dataframe['high_risk'] == 1) |                         # Multiple warning signals
+            (dataframe['bearish_divergence'] == 1) |                # RSI divergence detected
+            (dataframe['volume_exhaustion'] == 1) |                 # Volume drying up
+            ((dataframe['failed_breaks'] >= 3) & (dataframe['rsi'] > 65)) |  # Multiple failed breakouts
+            ((dataframe['lower_high'] == 1) & (dataframe['lower_low'] == 1)) |  # Market structure breakdown
+            (dataframe['momentum_1h'] < -0.03)                      # Sharp 1-hour drop (3%+)
+        )
+        
+        # Combine all exit signals
+        long_exit = original_exit | crash_protection_exit
         
         # Initialize columns if they don't exist
         dataframe['exit_long'] = 0
@@ -233,11 +324,38 @@ class BeastModeStrategy(IStrategy):
         adjusted_stake = proposed_stake * multiplier
         return min(max(adjusted_stake, min_stake), max_stake)
     
+    def custom_stoploss(self, pair: str, trade: Trade, current_time: datetime,
+                        current_rate: float, current_profit: float, **kwargs) -> float:
+        """
+        Dynamic stop loss based on market conditions
+        """
+        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        if len(dataframe) < 1:
+            return self.stoploss
+        
+        latest = dataframe.iloc[-1]
+        
+        # Tighter stop loss in high-risk conditions
+        if latest.get('rsi', 50) > 70:
+            return -0.03  # 3% stop when overbought
+        elif latest.get('atr_pct', 2) > 4:
+            return -0.04  # 4% stop in high volatility
+        elif latest.get('high_risk', 0) == 1:
+            return -0.025  # 2.5% stop when crash warnings present
+        
+        # Time-based stop tightening
+        if trade.open_date:
+            hours_open = (current_time - trade.open_date).total_seconds() / 3600
+            if hours_open > 24:
+                return -0.04  # Tighter stop for old positions
+        
+        return self.stoploss
+    
     def confirm_trade_entry(self, pair: str, order_type: str, amount: float, rate: float,
                            time_in_force: str, current_time: datetime, entry_tag: str,
                            side: str, **kwargs) -> bool:
         """
-        RISK-MANAGED entry confirmation with daily loss limits and volatility filters
+        Enhanced entry confirmation with time-based and correlation checks
         """
         
         # 1. DAILY LOSS LIMIT CHECK (Critical Risk Management)
@@ -288,11 +406,49 @@ class BeastModeStrategy(IStrategy):
                 logger.warning(f"EXTREME VOLATILITY: {atr_pct:.1f}% ATR - blocking {pair} entry")
                 return False
         
-        # 3. WEEKEND FILTER (Optional - crypto trades 24/7 but weekends can be choppy)
-        weekend = current_time.weekday() >= 5  # Saturday = 5, Sunday = 6
-        if weekend:
-            # Allow weekend trading but be more selective
-            # Could add additional filters here if needed
-            pass
+        # 3. TIME-BASED RISK MANAGEMENT
+        current_hour = current_time.hour
+        risky_hours = [8, 9, 15, 16]  # UTC hours with historical crashes
+        
+        if current_hour in risky_hours:
+            logger.info(f"Risky hour detected ({current_hour}:00 UTC) - being more selective for {pair}")
+            # During risky hours, only allow entries with stronger signals
+            dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+            if len(dataframe) >= 1:
+                latest = dataframe.iloc[-1]
+                # Require stronger conditions during risky hours
+                if latest.get('rsi', 50) > 60 or latest.get('crash_warning', 0) > 0:
+                    logger.warning(f"Blocking {pair} entry during risky hour with weak conditions")
+                    return False
+        
+        # 4. BTC CORRELATION CHECK
+        # Check if BTC has dropped significantly (market-wide risk)
+        try:
+            btc_pair = 'BTC/USDT:USDT'
+            if pair != btc_pair:  # Don't check BTC against itself
+                btc_df, _ = self.dp.get_analyzed_dataframe(btc_pair, self.timeframe)
+                if len(btc_df) >= 1:
+                    btc_latest = btc_df.iloc[-1]
+                    btc_1h_change = btc_latest.get('momentum_1h', 0)
+                    
+                    # If BTC dropped more than 2% in last hour, don't enter alts
+                    if btc_1h_change < -0.02:
+                        logger.warning(f"BTC CRASH DETECTED ({btc_1h_change:.2%}) - blocking {pair} entry")
+                        return False
+        except Exception as e:
+            logger.debug(f"Could not check BTC correlation: {e}")
+        
+        # 5. POSITION CORRELATION LIMITS
+        # Limit number of correlated positions
+        try:
+            open_trades = Trade.get_trades_proxy(is_open=True)
+            crypto_positions = len([t for t in open_trades if 'USDT' in t.pair])
+            
+            # Maximum 5 correlated crypto positions
+            if crypto_positions >= 5:
+                logger.info(f"Already have {crypto_positions} crypto positions - blocking {pair} to limit correlation")
+                return False
+        except Exception as e:
+            logger.debug(f"Could not check position correlation: {e}")
         
         return True
