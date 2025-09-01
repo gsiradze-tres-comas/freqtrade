@@ -35,11 +35,11 @@ class BeastModeStrategy(IStrategy):
         "600": 0.008
     }
     
-    # SAME SafeBullRider stops - THIS WORKS
-    stoploss = -0.06
+    # IMPROVED stops - wider base stop loss for crypto volatility
+    stoploss = -0.10  # Increased from 6% to 10% for crypto volatility
     trailing_stop = True
-    trailing_stop_positive = 0.015
-    trailing_stop_positive_offset = 0.02
+    trailing_stop_positive = 0.03  # Increased from 1.5% to 3% activation
+    trailing_stop_positive_offset = 0.04  # Increased from 2% to 4% distance
     trailing_only_offset_is_reached = True
     
     # Position adjustment
@@ -84,9 +84,11 @@ class BeastModeStrategy(IStrategy):
         # Candle patterns
         dataframe['green_candle'] = (dataframe['close'] > dataframe['open']).astype(int)
         
-        # Volatility
+        # Volatility - Enhanced ATR for dynamic stop loss
         dataframe['atr'] = ta.ATR(dataframe, timeperiod=14)
         dataframe['atr_pct'] = (dataframe['atr'] / dataframe['close']) * 100
+        dataframe['atr_short'] = ta.ATR(dataframe, timeperiod=7)  # Faster ATR for recent volatility
+        dataframe['atr_pct_short'] = (dataframe['atr_short'] / dataframe['close']) * 100
         
         # NEW quality indicators
         
@@ -181,6 +183,59 @@ class BeastModeStrategy(IStrategy):
         dataframe.loc[long_exit, 'exit_tag'] = 'trend_reversal'
         
         return dataframe
+    
+    def custom_stoploss(self, pair: str, trade: Trade, current_time: datetime,
+                       current_rate: float, current_profit: float, **kwargs) -> float:
+        """
+        Dynamic ATR-based stop loss with time-based protection
+        """
+        
+        # Get dataframe for volatility analysis
+        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        if len(dataframe) < 1:
+            return self.stoploss  # Fallback to base stop loss
+        
+        latest = dataframe.iloc[-1]
+        
+        # 1. TIME-BASED PROTECTION - No stops for first 30 minutes
+        trade_duration = current_time - trade.open_date_utc
+        minutes_open = trade_duration.total_seconds() / 60
+        
+        if minutes_open < 30:
+            return -1.0  # Disable stop loss for first 30 minutes
+        
+        # 2. DYNAMIC ATR-BASED STOP LOSS
+        atr_pct = latest.get('atr_pct_short', 3.0)  # Use faster ATR
+        
+        # Adjust stop loss based on current volatility
+        if atr_pct < 2.0:  # Low volatility
+            dynamic_stop = -0.06  # 6% stop loss
+        elif atr_pct < 4.0:  # Normal volatility  
+            dynamic_stop = -0.08  # 8% stop loss
+        elif atr_pct < 6.0:  # High volatility
+            dynamic_stop = -0.12  # 12% stop loss
+        else:  # Extreme volatility
+            dynamic_stop = -0.15  # 15% stop loss
+        
+        # 3. TIME-GRADUATED PROTECTION - Wider stops for first 2 hours
+        if minutes_open < 120:  # First 2 hours
+            dynamic_stop = dynamic_stop * 1.5  # Make stop 50% wider
+            dynamic_stop = max(dynamic_stop, -0.15)  # Cap at 15%
+        
+        # 4. TREND STRENGTH ADJUSTMENT
+        uptrend = latest.get('uptrend', False)
+        momentum_20 = latest.get('momentum_20', 0)
+        
+        if uptrend and momentum_20 > 0.02:  # Strong uptrend
+            dynamic_stop = dynamic_stop * 1.2  # 20% wider stops in strong trends
+            dynamic_stop = max(dynamic_stop, -0.12)  # Cap at 12%
+        
+        # Ensure we don't make stop loss tighter than base
+        final_stop = max(dynamic_stop, self.stoploss)
+        
+        logger.info(f"{pair}: Dynamic stop {final_stop:.1%} (ATR: {atr_pct:.1f}%, Duration: {minutes_open:.0f}min)")
+        
+        return final_stop
     
     def custom_stake_amount(self, pair: str, current_time: datetime, current_rate: float,
                            proposed_stake: float, min_stake: float, max_stake: float,
@@ -296,3 +351,4 @@ class BeastModeStrategy(IStrategy):
             pass
         
         return True
+    

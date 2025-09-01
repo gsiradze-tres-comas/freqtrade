@@ -3,7 +3,7 @@
     "margin_mode": "isolated",
     "max_open_trades": 15,
     "stake_currency": "USDT",
-    "stake_amount": "unlimited",
+    "stake_amount": 500,
     "tradable_balance_ratio": 0.99,
     "fiat_display_currency": "USD",
     "dry_run": true,
@@ -99,7 +99,7 @@
     "bot_name": "SafeBullRider",
     "initial_state": "running",
     "force_entry_enable": false,
-    "strategy": "BeastModeStrategy",
+    "strategy": "WinningStrategy45Percent",
     "internals": {
         "process_throttle_secs": 3
     },

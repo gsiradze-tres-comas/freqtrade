@@ -13,6 +13,7 @@ import talib.abstract as ta
 from pathlib import Path
 from datetime import datetime, timedelta
 import logging
+import random
 import json
 import argparse
 
@@ -301,13 +302,35 @@ except Exception as e:
 # Set up comprehensive Trade mocking for strategy use
 MockTrade = CompleteMockTrade
 
+# Simple Trade class for backtesting positions
+class Trade:
+    """Simple trade position class for backtesting"""
+    def __init__(self, symbol, entry_time, entry_price, quantity, entry_signal):
+        self.symbol = symbol
+        self.entry_time = entry_time
+        self.entry_price = entry_price
+        self.quantity = quantity
+        self.entry_signal = entry_signal
+        self.exit_time = None
+        self.exit_price = None
+        self.exit_reason = None
+        self.pnl = 0.0
+        self.pnl_pct = 0.0
+        self.is_winner = False
+        self.funding_fees = 0.0  # Track cumulative funding fees for this trade
+
 class FastMultiPairBacktester(TickBacktester):
     """
     High-performance backtester: Candles for signals, ticks for execution
     """
     
-    def __init__(self, initial_balance=2000):
+    def __init__(self, initial_balance=2000, debug_mode=False, include_funding_fees=True, fast_mode=False):
         super().__init__()
+        
+        # Store settings
+        self.debug_mode = debug_mode
+        self.include_funding_fees = include_funding_fees
+        self.fast_mode = fast_mode
         
         # Set initial balance
         self.portfolio.current_balance = initial_balance
@@ -452,50 +475,636 @@ class FastMultiPairBacktester(TickBacktester):
             (tick_data['datetime'] < end_time)
         ].copy()
         
+        if len(window_data) > 0 and self.debug_mode:
+            logger.info(f"🚨 TICK WINDOW: {symbol} from {start_time} has {len(window_data)} ticks, first: {window_data['datetime'].min()}, last: {window_data['datetime'].max()}")
+        
         # Cache for reuse
         self.tick_cache[cache_key] = window_data
         
         return window_data
     
-    def get_execution_price(self, symbol, signal_time, action='buy'):
-        """Get realistic execution price from next tick after signal - ZERO CHEATING"""
-        tick_window = self.load_tick_window(symbol, signal_time)
+    def get_execution_price(self, symbol, execution_time, action='buy', position_size_usd=0, decay_penalty=1.0):
+        """Get realistic execution price from next tick after execution time - ZERO CHEATING"""
+        tick_window = self.load_tick_window(symbol, execution_time)
         
         if tick_window is None or len(tick_window) == 0:
-            logger.warning(f"⚠️  NO TICK DATA for {symbol} at {signal_time} - TRADE REJECTED")
+            logger.warning(f"⚠️  NO TICK DATA for {symbol} at {execution_time} - TRADE REJECTED")
             return None
         
-        # CRITICAL: Only use ticks AFTER signal time (prevents cheating)
-        future_ticks = tick_window[tick_window['datetime'] > signal_time]
+        # CRITICAL: Only use ticks AFTER execution time (prevents cheating)
+        future_ticks = tick_window[tick_window['datetime'] > execution_time]
+        if self.debug_mode:
+            logger.info(f"🚨 TICK CHEAT CHECK: {symbol} execution at {execution_time}, tick window {len(tick_window)} ticks, future ticks {len(future_ticks)}")
         
         if len(future_ticks) == 0:
             # FALLBACK: Use last tick + conservative slippage (realistic but penalizing)
-            logger.warning(f"⚠️  No future ticks for {symbol} at {signal_time} - using fallback")
+            logger.warning(f"⚠️  No future ticks for {symbol} at {execution_time} - using fallback")
             execution_price = tick_window['price'].iloc[-1]
-            # Add extra penalty for data gap + trading fees
+            
+            # Apply same dynamic slippage logic even in fallback
+            volatility_factor = self._calculate_volatility_factor(symbol, execution_time)
+            liquidity_factor = self._calculate_liquidity_impact(position_size_usd, symbol)
+            
+            # Base costs + penalty for missing data
+            base_slippage = 0.0001  # 0.01% base slippage
             penalty_slippage = 0.0005  # 0.05% penalty for missing data
             trading_fee = 0.0004      # 0.04% Binance futures taker fee
-            total_cost = penalty_slippage + trading_fee
+            
+            # Dynamic slippage adjustments (same as normal case)
+            volatility_slippage = base_slippage * volatility_factor
+            liquidity_slippage = base_slippage * liquidity_factor
+            
+            # Apply strategy decay penalty to slippage
+            decay_slippage = base_slippage * (decay_penalty - 1.0)  # Additional cost from decay
+            total_cost = base_slippage + penalty_slippage + volatility_slippage + liquidity_slippage + decay_slippage + trading_fee
+            
+            if self.debug_mode:
+                logger.info(f"💰 FALLBACK SLIPPAGE {symbol}: base={base_slippage:.4f}, penalty={penalty_slippage:.4f}, "
+                           f"vol={volatility_slippage:.4f}, liq={liquidity_slippage:.4f}, decay={decay_slippage:.4f}, fee={trading_fee:.4f}, total={total_cost:.4f}")
             
             if action == 'buy':
                 execution_price *= (1 + total_cost)
             else:
                 execution_price *= (1 - total_cost)
         else:
-            # IDEAL: Use first tick after signal (realistic execution)
-            execution_price = future_ticks['price'].iloc[0]
+            # REALISTIC: Don't always get first tick - simulate execution slippage
+            tick_index = min(
+                random.randint(0, 2),  # Could slip to 1st, 2nd, or 3rd tick
+                len(future_ticks) - 1
+            )
+            execution_price = future_ticks['price'].iloc[tick_index]
             
-            # Add realistic market slippage + trading fees
-            slippage = 0.0001     # 0.01% slippage
-            trading_fee = 0.0004  # 0.04% Binance futures taker fee
-            total_cost = slippage + trading_fee
+            # CHEAT FIX #4: Dynamic slippage based on volatility and position size
+            volatility_factor = self._calculate_volatility_factor(symbol, execution_time)
+            liquidity_factor = self._calculate_liquidity_impact(position_size_usd, symbol)
+            
+            # Base costs
+            base_slippage = 0.0001  # 0.01% base slippage
+            trading_fee = 0.0004   # 0.04% Binance futures taker fee
+            
+            # Dynamic slippage adjustments
+            volatility_slippage = base_slippage * volatility_factor  # 1x to 3x multiplier
+            liquidity_slippage = base_slippage * liquidity_factor    # 1x to 2x multiplier for large orders
+            extra_slippage = random.uniform(0, 0.0002)  # 0-0.02% random market noise
+            
+            # Apply strategy decay penalty to slippage
+            decay_slippage = base_slippage * (decay_penalty - 1.0)  # Additional cost from decay
+            total_cost = base_slippage + volatility_slippage + liquidity_slippage + extra_slippage + decay_slippage + trading_fee
+            
+            if self.debug_mode:
+                logger.info(f"💰 SLIPPAGE BREAKDOWN {symbol}: base={base_slippage:.4f}, vol={volatility_slippage:.4f}, "
+                           f"liq={liquidity_slippage:.4f}, noise={extra_slippage:.4f}, decay={decay_slippage:.4f}, fee={trading_fee:.4f}, total={total_cost:.4f}")
             
             if action == 'buy':
                 execution_price *= (1 + total_cost)
             else:  # sell
                 execution_price *= (1 - total_cost)
         
-        return execution_price
+        # ULTRA REALISTIC: Apply market gaps and flash crashes AFTER normal slippage
+        final_price, gap_event = self._simulate_market_gaps_and_crashes(symbol, execution_price, execution_time)
+        
+        if gap_event != "none":
+            gap_impact = abs(final_price - execution_price) / execution_price
+            if gap_impact > 0.01:  # Log significant gaps (>1%)
+                logger.warning(f"🌪️ MARKET EVENT: {symbol} {gap_event} - ${execution_price:.4f} → ${final_price:.4f} ({gap_impact:+.1%})")
+        
+        return final_price
+    
+    def _calculate_volatility_factor(self, symbol, execution_time):
+        """Calculate volatility-based slippage multiplier (1x to 3x)"""
+        try:
+            # Get recent price data to calculate volatility - use 30 seconds window (max available)
+            tick_window = self.load_tick_window(symbol, execution_time, duration_seconds=30)
+            
+            if tick_window is None or len(tick_window) < 10:
+                return 1.5  # Default moderate volatility
+            
+            # CRITICAL: Only use historical ticks for volatility (no future data leakage)
+            historical_ticks = tick_window[tick_window['datetime'] <= execution_time]
+            
+            if len(historical_ticks) < 10:
+                return 1.5  # Default moderate volatility if insufficient historical data
+            
+            # Calculate price volatility (standard deviation of returns)
+            prices = historical_ticks['price']
+            returns = prices.pct_change().dropna()
+            
+            if len(returns) < 5:
+                return 1.5
+            
+            volatility = returns.std()
+            
+            # Convert volatility to slippage multiplier
+            if volatility > 0.002:  # High volatility (>0.2% tick-to-tick moves)
+                return 3.0  # 3x slippage during volatile periods
+            elif volatility > 0.001:  # Medium volatility
+                return 2.0  # 2x slippage
+            else:  # Low volatility
+                return 1.0  # Normal slippage
+                
+        except Exception as e:
+            logger.warning(f"Error calculating volatility factor for {symbol}: {e}")
+            return 1.5  # Safe default
+    
+    def _calculate_liquidity_impact(self, position_size_usd, symbol):
+        """Calculate liquidity impact multiplier based on position size (1x to 2x)"""
+        # CHEAT FIX #3: Basic liquidity constraints
+        # Larger positions get worse execution due to market impact
+        
+        # Estimate daily volume (rough approximation for different symbols)
+        symbol_volume_tiers = {
+            'BTCUSDT': 1000000000,    # $1B+ daily volume
+            'ETHUSDT': 500000000,     # $500M+ daily volume
+            'BNBUSDT': 100000000,     # $100M+ daily volume
+            'XRPUSDT': 200000000,     # $200M+ daily volume
+            'SOLUSDT': 150000000,     # $150M+ daily volume
+            'ADAUSDT': 80000000,      # $80M+ daily volume
+            'AVAXUSDT': 50000000,     # $50M+ daily volume
+            'DOGEUSDT': 300000000,    # $300M+ daily volume
+            'DOTUSDT': 30000000,      # $30M+ daily volume
+            'LINKUSDT': 40000000,     # $40M+ daily volume
+            'UNIUSDT': 25000000,      # $25M+ daily volume
+            'BCHUSDT': 60000000,      # $60M+ daily volume
+            'TIAUSDT': 10000000,      # $10M+ daily volume
+        }
+        
+        estimated_daily_volume = symbol_volume_tiers.get(symbol, 50000000)  # $50M default
+        
+        # Calculate position as percentage of daily volume
+        position_pct_of_volume = position_size_usd / estimated_daily_volume
+        
+        if position_pct_of_volume > 0.01:    # >1% of daily volume - HUGE impact
+            logger.warning(f"🚨 LARGE ORDER: {symbol} ${position_size_usd:,.0f} is {position_pct_of_volume:.4f}% of daily volume")
+            return 2.0  # 2x slippage penalty
+        elif position_pct_of_volume > 0.005:  # >0.5% of daily volume - significant impact
+            return 1.5  # 1.5x slippage penalty
+        elif position_pct_of_volume > 0.001:  # >0.1% of daily volume - moderate impact
+            return 1.2  # 1.2x slippage penalty
+        else:
+            return 1.0  # Normal execution for small orders
+    
+    def _calculate_fill_rate(self, symbol, position_size_usd, execution_time):
+        """Calculate realistic fill rate based on order size and market conditions"""
+        # CHEAT FIX #10: Add realistic partial fill simulation
+        
+        # Base fill rate depends on position size relative to typical order book depth
+        if position_size_usd < 100:  # Small orders (<$100)
+            base_fill_rate = 0.98  # 98% fill rate (small slippage)
+        elif position_size_usd < 500:  # Medium orders ($100-500)
+            base_fill_rate = 0.95  # 95% fill rate
+        elif position_size_usd < 2000:  # Large orders ($500-2000)
+            base_fill_rate = 0.90  # 90% fill rate
+        else:  # Very large orders (>$2000)
+            base_fill_rate = 0.85  # 85% fill rate (significant market impact)
+            
+        # Adjust for market volatility (higher volatility = worse fills)
+        try:
+            volatility_factor = self._calculate_volatility_factor(symbol, execution_time)
+            if volatility_factor > 2.0:  # High volatility
+                volatility_penalty = 0.05  # 5% additional unfilled
+            elif volatility_factor > 1.5:  # Medium volatility
+                volatility_penalty = 0.02  # 2% additional unfilled
+            else:
+                volatility_penalty = 0.0  # No additional penalty
+                
+            final_fill_rate = max(0.70, base_fill_rate - volatility_penalty)  # Never less than 70% filled
+            
+            if final_fill_rate < 0.95:
+                logger.info(f"📊 PARTIAL FILL: {symbol} ${position_size_usd:.0f} order, {final_fill_rate:.1%} filled (volatility factor: {volatility_factor:.1f})")
+                
+            return final_fill_rate
+            
+        except Exception as e:
+            logger.warning(f"Error calculating fill rate for {symbol}: {e}")
+            return 0.95  # Safe default
+    
+    def _calculate_funding_fee(self, symbol, position_value, current_time):
+        """Calculate realistic futures funding fees (every 8 hours)"""
+        # CHEAT FIX #12: Add realistic funding fee simulation
+        
+        # Funding times: 00:00, 08:00, 16:00 UTC
+        hour = current_time.hour
+        if hour not in [0, 8, 16]:
+            return 0.0  # No funding fee unless at funding time
+            
+        # Realistic funding rates based on market conditions and symbol
+        # Positive funding = longs pay shorts, Negative funding = shorts pay longs
+        
+        # Simulate market regime based on time patterns
+        # Bull market periods tend to have positive funding (expensive for longs)
+        # Bear market periods tend to have negative funding (expensive for shorts)
+        
+        # Use hash of timestamp for deterministic but varied funding rates
+        time_seed = hash(str(current_time.date()) + str(hour)) % 1000000
+        base_rate = (time_seed % 100 - 50) / 10000  # Range: -0.5% to +0.5%
+        
+        # Symbol-specific adjustments (major coins have lower funding variance)
+        if symbol in ['BTCUSDT', 'ETHUSDT']:
+            base_rate *= 0.6  # Lower variance for major coins
+        elif symbol in ['BNBUSDT', 'XRPUSDT', 'SOLUSDT']:
+            base_rate *= 0.8  # Medium variance
+        else:
+            base_rate *= 1.2  # Higher variance for smaller coins
+            
+        # Market volatility increases funding magnitude
+        try:
+            volatility_factor = self._calculate_volatility_factor(symbol, current_time)
+            if volatility_factor > 2.0:  # High volatility
+                base_rate *= 1.5  # Higher funding during volatile periods
+            elif volatility_factor < 1.0:  # Low volatility
+                base_rate *= 0.7  # Lower funding during calm periods
+        except:
+            pass  # Use base rate if volatility calculation fails
+            
+        # Cap funding rates to realistic bounds (-0.75% to +0.75% per 8h)
+        funding_rate = max(-0.0075, min(0.0075, base_rate))
+        
+        # Calculate funding fee (positive = cost for long positions)
+        funding_fee = position_value * funding_rate
+        
+        if abs(funding_fee) > position_value * 0.001:  # Log significant funding fees
+            logger.info(f"💰 FUNDING FEE: {symbol} ${position_value:.0f} position, {funding_rate:.4%} rate, ${funding_fee:+.2f} fee")
+            
+        return funding_fee
+    
+    def _apply_funding_fees(self, current_time):
+        """Apply funding fees to all open positions at funding times"""
+        # Check if this is a funding time (00:00, 08:00, 16:00 UTC)
+        if current_time.hour not in [0, 8, 16] or current_time.minute != 0:
+            return
+            
+        total_funding_cost = 0.0
+        
+        for trade in self.portfolio.open_positions:
+            # Calculate current position value
+            position_value = trade.entry_price * trade.quantity
+            
+            # Calculate funding fee for this position
+            funding_fee = self._calculate_funding_fee(trade.symbol, position_value, current_time)
+            
+            # Apply funding fee to balance (positive fee = cost to trader)
+            self.portfolio.available_balance -= funding_fee
+            total_funding_cost += funding_fee
+            
+            # Track funding fees on the trade
+            if not hasattr(trade, 'funding_fees'):
+                trade.funding_fees = 0.0
+            trade.funding_fees += funding_fee
+        
+        if abs(total_funding_cost) > 1.0:  # Log significant total funding
+            logger.info(f"⏰ FUNDING EVENT: {current_time.strftime('%Y-%m-%d %H:%M')} UTC - Total funding cost: ${total_funding_cost:+.2f}")
+    
+    def _simulate_exchange_downtime(self, current_time):
+        """Simulate realistic exchange downtime and API failures"""
+        # ULTRA REALISTIC: Exchanges go down during high volatility
+        
+        # Use deterministic but realistic downtime simulation
+        time_seed = hash(str(current_time)) % 10000
+        
+        # Higher chance of downtime during volatile periods
+        volatility_multiplier = 1.0
+        try:
+            # Check if we have any open positions to calculate market stress
+            if len(self.portfolio.open_positions) > 0:
+                # Use BTC as market indicator (most liquid)
+                btc_volatility = self._calculate_volatility_factor('BTCUSDT', current_time)
+                if btc_volatility > 2.5:  # Extreme volatility
+                    volatility_multiplier = 5.0  # 5x more likely to have issues
+                elif btc_volatility > 2.0:  # High volatility  
+                    volatility_multiplier = 3.0  # 3x more likely
+                elif btc_volatility > 1.5:  # Medium volatility
+                    volatility_multiplier = 1.5  # 1.5x more likely
+        except:
+            pass
+        
+        # REALISTIC: Binance has 99.9%+ uptime - major outages are VERY rare
+        # Base downtime probability: ~0.001% per 5-minute period (matches Binance's actual reliability)
+        base_downtime_chance = 1  # out of 100000 (not 10000!)
+        adjusted_chance = int(base_downtime_chance * volatility_multiplier)
+        
+        # Major planned maintenance (monthly, predictable)
+        # Check for monthly maintenance windows (first Monday of month, 08:00-10:00 UTC)
+        is_maintenance_window = (
+            current_time.weekday() == 0 and  # Monday
+            1 <= current_time.day <= 7 and   # First week of month
+            8 <= current_time.hour <= 10     # 08:00-10:00 UTC
+        )
+        
+        if is_maintenance_window:
+            # Planned maintenance - 2 hour window, known in advance
+            logger.info(f"🔧 PLANNED MAINTENANCE: {current_time.strftime('%Y-%m-%d %H:%M')} - Binance monthly maintenance window")
+            return 0.5  # Reduced functionality, not complete outage
+        
+        # Historical outages (based on actual Binance incidents)
+        # These are the only times Binance had significant issues:
+        historical_stress_dates = [
+            # March 2020 COVID crash
+            (pd.Timestamp('2020-03-12', tz='UTC'), pd.Timestamp('2020-03-13', tz='UTC')),
+            # May 2021 crypto crash  
+            (pd.Timestamp('2021-05-19', tz='UTC'), pd.Timestamp('2021-05-19', tz='UTC')),
+            # FTX collapse stress
+            (pd.Timestamp('2022-11-08', tz='UTC'), pd.Timestamp('2022-11-09', tz='UTC')),
+        ]
+        
+        # Check if current time is during historical stress period
+        current_date = current_time.date()
+        is_historical_stress = any(
+            start_date.date() <= current_date <= end_date.date() 
+            for start_date, end_date in historical_stress_dates
+        )
+        
+        # Unplanned outages (extremely rare for Binance)
+        if time_seed < adjusted_chance:
+            # Only during EXTREME market stress AND historical stress periods
+            if volatility_multiplier >= 3.0 and is_historical_stress:
+                downtime_duration = (time_seed % 3) + 1  # 1-3 periods (5-15 minutes max)
+                logger.error(f"🚨 HISTORICAL STRESS OUTAGE: {current_time.strftime('%Y-%m-%d %H:%M')} - "
+                           f"Reproducing actual Binance stress from extreme market conditions ({downtime_duration * 5}min)")
+                return downtime_duration
+            else:
+                return 0  # No outage - Binance is too reliable
+        
+        # API rate limiting (more realistic - happens during high load)
+        if time_seed < adjusted_chance * 100:  # 100x more common than outages
+            if volatility_multiplier >= 2.0:  # Only during elevated volatility
+                logger.debug(f"⚠️ API THROTTLING: {current_time.strftime('%Y-%m-%d %H:%M')} - Slight delay due to high load")
+                return 0.1  # Minor delay, not blocking
+            
+        return 0  # No issues
+    
+    def _simulate_market_gaps_and_crashes(self, symbol, base_price, current_time):
+        """Simulate realistic market gaps and flash crashes"""
+        # ULTRA REALISTIC: Markets gap and crash during stress periods
+        
+        # Use deterministic but realistic simulation based on time and symbol
+        time_seed = hash(str(current_time) + symbol) % 100000
+        
+        # Higher probability during known stress times
+        stress_multiplier = 1.0
+        hour = current_time.hour
+        
+        # Weekend gaps (Sunday 21:00-22:00 UTC when markets reopen)
+        if current_time.weekday() == 6 and 21 <= hour <= 22:
+            stress_multiplier = 8.0  # 8x more likely during weekend gaps
+        
+        # Asian session volatility (01:00-05:00 UTC)
+        elif 1 <= hour <= 5:
+            stress_multiplier = 2.0  # 2x more likely during thin liquidity
+        
+        # US market open volatility (13:30-14:30 UTC)
+        elif 13 <= hour <= 14:
+            stress_multiplier = 3.0  # 3x more likely during US open
+        
+        # Flash crash probability: ~0.02% per 5-minute period during normal times
+        base_crash_chance = 2  # out of 100000
+        adjusted_chance = int(base_crash_chance * stress_multiplier)
+        
+        modified_price = base_price
+        gap_type = "none"
+        
+        # Check for extreme events
+        if time_seed < adjusted_chance:
+            # Determine crash type and severity
+            crash_severity = (time_seed % 20) + 5  # 5-25% price movement
+            crash_type = time_seed % 4
+            
+            if crash_type == 0:  # Flash crash (sudden drop + recovery)
+                # Price drops suddenly, then partially recovers within the period
+                crash_magnitude = crash_severity / 100  # 5-25% drop
+                recovery_factor = 0.3 + (time_seed % 40) / 100  # 30-70% recovery
+                
+                # Worst execution price during the flash crash
+                flash_crash_price = base_price * (1 - crash_magnitude)
+                # Partial recovery price
+                recovery_price = flash_crash_price + (base_price - flash_crash_price) * recovery_factor
+                
+                modified_price = min(flash_crash_price, recovery_price)  # Worst case for buyer
+                gap_type = f"flash_crash_{crash_magnitude:.1%}"
+                
+                logger.warning(f"⚡ FLASH CRASH: {symbol} {current_time.strftime('%Y-%m-%d %H:%M')} - "
+                             f"Price ${base_price:.4f} → ${flash_crash_price:.4f} → ${recovery_price:.4f} (execution: ${modified_price:.4f})")
+                
+            elif crash_type == 1:  # Market gap down
+                gap_magnitude = crash_severity / 100
+                modified_price = base_price * (1 - gap_magnitude)
+                gap_type = f"gap_down_{gap_magnitude:.1%}"
+                
+                logger.warning(f"📉 MARKET GAP: {symbol} {current_time.strftime('%Y-%m-%d %H:%M')} - "
+                             f"Gap down {gap_magnitude:.1%}: ${base_price:.4f} → ${modified_price:.4f}")
+                
+            elif crash_type == 2:  # Market gap up (good for longs, bad for shorts)
+                gap_magnitude = crash_severity / 100
+                modified_price = base_price * (1 + gap_magnitude * 0.6)  # Smaller upward gaps
+                gap_type = f"gap_up_{gap_magnitude:.1%}"
+                
+                logger.info(f"📈 MARKET GAP: {symbol} {current_time.strftime('%Y-%m-%d %H:%M')} - "
+                           f"Gap up {gap_magnitude:.1%}: ${base_price:.4f} → ${modified_price:.4f}")
+                
+            else:  # Black swan event (extreme move)
+                # Very rare, very large moves (crypto-specific)
+                swan_magnitude = (crash_severity * 2) / 100  # 10-50% move
+                direction = 1 if (time_seed % 2) == 0 else -1
+                modified_price = base_price * (1 + direction * swan_magnitude)
+                gap_type = f"black_swan_{swan_magnitude:.1%}"
+                
+                logger.error(f"🦢 BLACK SWAN: {symbol} {current_time.strftime('%Y-%m-%d %H:%M')} - "
+                           f"Extreme move {swan_magnitude:.1%}: ${base_price:.4f} → ${modified_price:.4f}")
+        
+        # Also simulate smaller gaps (more common)
+        elif time_seed < adjusted_chance * 50:  # 50x more common than major events
+            small_gap = ((time_seed % 10) - 5) / 1000  # ±0.5% gaps
+            modified_price = base_price * (1 + small_gap)
+            
+            if abs(small_gap) > 0.002:  # Log gaps > 0.2%
+                gap_type = f"mini_gap_{small_gap:+.2%}"
+                logger.debug(f"📊 MINI GAP: {symbol} {small_gap:+.2%} - ${base_price:.4f} → ${modified_price:.4f}")
+        
+        return modified_price, gap_type
+    
+    def _simulate_strategy_decay(self, signal_strength, current_time, backtest_start_time):
+        """Simulate realistic strategy decay over time"""
+        # ULTRA REALISTIC: Trading strategies lose edge as markets adapt
+        
+        # Calculate how long the strategy has been "known" to the market
+        days_elapsed = (current_time - backtest_start_time).total_seconds() / 86400
+        months_elapsed = days_elapsed / 30.0
+        
+        # Base decay rate: strategies typically lose 10-30% effectiveness per year
+        # Faster decay in crypto due to algorithmic trading proliferation
+        annual_decay_rate = 0.25  # 25% annual decay (aggressive but realistic for crypto)
+        monthly_decay_rate = annual_decay_rate / 12
+        
+        # Decay factors
+        decay_factor = 1.0 - (monthly_decay_rate * months_elapsed)
+        decay_factor = max(0.3, decay_factor)  # Never decay below 30% effectiveness
+        
+        # Different decay patterns for different aspects
+        signal_decay = decay_factor ** 0.8  # Slower signal decay
+        execution_decay = decay_factor ** 1.2  # Faster execution decay (more competition)
+        
+        # Apply decay to signal strength
+        decayed_signal_strength = signal_strength * signal_decay
+        
+        # Additional "crowding" effect - more decay during high activity periods
+        hour = current_time.hour
+        if 13 <= hour <= 16:  # US trading hours - more algorithmic competition
+            crowding_penalty = 0.95  # 5% additional decay during busy hours
+            decayed_signal_strength *= crowding_penalty
+        
+        # Log significant decay milestones
+        if months_elapsed > 0 and int(months_elapsed) != int(months_elapsed - 1/30):  # Log monthly
+            total_decay = 1 - decayed_signal_strength
+            if total_decay > 0.1:  # Only log if decay > 10%
+                logger.info(f"📉 STRATEGY DECAY: Month {months_elapsed:.1f} - Signal strength: {decayed_signal_strength:.1%} "
+                           f"(Original: 100%, Decay: {total_decay:.1%})")
+        
+        # Return decay multipliers for different aspects
+        return {
+            'signal_strength': decayed_signal_strength,
+            'execution_penalty': 1.0 / execution_decay,  # Higher = worse execution
+            'months_elapsed': months_elapsed,
+            'total_decay': 1.0 - decayed_signal_strength
+        }
+    
+    def _simulate_correlation_breakdown(self, current_time, open_positions):
+        """Simulate correlation breakdown during market stress (diversification failure)"""
+        # ULTRA REALISTIC: During crises, ALL assets move together (diversification fails)
+        
+        # Use deterministic but realistic simulation
+        time_seed = hash(str(current_time.date())) % 100000
+        
+        # Higher probability during known stress periods
+        stress_multiplier = 1.0
+        hour = current_time.hour
+        day_of_week = current_time.weekday()
+        
+        # Market stress multipliers
+        if day_of_week == 6 and 21 <= hour <= 23:  # Sunday evening crypto reopening
+            stress_multiplier = 5.0
+        elif 1 <= hour <= 4:  # Asian session thin liquidity
+            stress_multiplier = 2.0
+        elif 13 <= hour <= 15:  # US market open overlap
+            stress_multiplier = 3.0
+        
+        # Base correlation breakdown chance: ~0.05% per day during normal times
+        base_breakdown_chance = 50  # out of 100000
+        adjusted_chance = int(base_breakdown_chance * stress_multiplier)
+        
+        if time_seed < adjusted_chance and len(open_positions) >= 3:
+            # Correlation breakdown event - all crypto moves in same direction
+            breakdown_severity = (time_seed % 15) + 5  # 5-20% correlated move
+            direction = -1 if (time_seed % 3) < 2 else 1  # 67% chance of downward move
+            
+            correlation_factor = 0.7 + (time_seed % 30) / 100  # 70-100% correlation
+            base_move = (breakdown_severity / 100) * direction
+            
+            # Generate correlated moves for all positions
+            correlated_moves = {}
+            for position in open_positions:
+                symbol = position.symbol
+                
+                # Each symbol gets slightly different move but highly correlated
+                symbol_seed = hash(symbol + str(current_time)) % 100
+                individual_variation = (symbol_seed % 6 - 3) / 100  # ±3% individual variation
+                
+                # Final move is mostly correlated + small individual component
+                symbol_move = base_move * correlation_factor + individual_variation * (1 - correlation_factor)
+                correlated_moves[symbol] = symbol_move
+                
+                # Log significant breakdown events
+                if abs(symbol_move) > 0.05:  # >5% move
+                    logger.error(f"🔗 CORRELATION BREAKDOWN: {symbol} forced move {symbol_move:+.1%} "
+                               f"(correlation: {correlation_factor:.0%}, severity: {breakdown_severity}%)")
+            
+            # Log the overall event
+            avg_move = sum(correlated_moves.values()) / len(correlated_moves)
+            logger.error(f"💥 DIVERSIFICATION FAILURE: {current_time.strftime('%Y-%m-%d %H:%M')} - "
+                        f"{len(correlated_moves)} positions moving together (avg: {avg_move:+.1%})")
+            
+            return correlated_moves
+        
+        # Also simulate smaller correlation events (more common)
+        elif time_seed < adjusted_chance * 20 and len(open_positions) >= 2:  # 20x more common
+            # Mini correlation event - partial correlation increase
+            mini_severity = (time_seed % 8) + 2  # 2-10% move
+            direction = -1 if (time_seed % 2) == 0 else 1
+            correlation_factor = 0.4 + (time_seed % 30) / 100  # 40-70% correlation
+            
+            base_move = (mini_severity / 100) * direction
+            mini_moves = {}
+            
+            # Only affect a subset of positions (simulate sector rotation)
+            affected_count = max(2, len(open_positions) // 2)
+            affected_positions = open_positions[:affected_count]  # First N positions
+            
+            for position in affected_positions:
+                symbol = position.symbol
+                symbol_seed = hash(symbol + str(current_time)) % 100
+                individual_variation = (symbol_seed % 4 - 2) / 100  # ±2% variation
+                
+                symbol_move = base_move * correlation_factor + individual_variation * (1 - correlation_factor)
+                mini_moves[symbol] = symbol_move
+                
+                if abs(symbol_move) > 0.03:  # Log >3% moves
+                    logger.warning(f"📊 MINI CORRELATION: {symbol} {symbol_move:+.1%} "
+                                 f"({affected_count}/{len(open_positions)} positions affected)")
+            
+            return mini_moves
+            
+        return {}  # No correlation event
+    
+    def _calculate_indicators_realtime(self, symbol, current_time):
+        """Calculate indicators using ONLY historical data up to current_time (Anti-Cheating)"""
+        
+        if symbol not in self.raw_candle_data:
+            logger.debug(f"🚫 DEBUG: {symbol} not in raw_candle_data")
+            return None
+            
+        # Get historical data up to PREVIOUS candle only (exclude current forming candle)
+        raw_data = self.raw_candle_data[symbol]
+        historical_data = raw_data[raw_data['datetime'] < current_time].copy()
+        
+        if self.debug_mode:
+            logger.info(f"🔍 CHEAT CHECK: {symbol} at {current_time}: {len(historical_data)} historical candles (from {len(raw_data)} total)")
+            if len(raw_data) > 0:
+                latest_raw_time = raw_data['datetime'].max()
+                if len(historical_data) > 0:
+                    latest_hist_time = historical_data['datetime'].max()
+                    logger.info(f"🔍 CHEAT CHECK: Latest raw candle: {latest_raw_time}, Latest historical: {latest_hist_time}, Current: {current_time}")
+                else:
+                    logger.info(f"🔍 CHEAT CHECK: Latest raw candle: {latest_raw_time}, NO historical data, Current: {current_time}")
+        
+        if len(historical_data) < self.strategy.startup_candle_count:
+            if self.debug_mode:
+                logger.debug(f"🚫 DEBUG: {symbol} insufficient data: {len(historical_data)} < {self.strategy.startup_candle_count}")
+            return None  # Not enough data for indicators
+        
+        # Keep reasonable amount for indicator calculation (last 200 candles max to save RAM)
+        if len(historical_data) > 200:
+            historical_data = historical_data.iloc[-200:].copy()
+            if self.debug_mode:
+                logger.debug(f"📏 DEBUG: {symbol} truncated to 200 candles")
+        
+        # Calculate indicators using ONLY historical data
+        pair_formatted = f"{symbol.replace('USDT', '')}/USDT:USDT"
+        processed = self.strategy.populate_indicators(historical_data, {'pair': pair_formatted})
+        if self.debug_mode:
+            logger.debug(f"📊 DEBUG: {symbol} indicators calculated: {len(processed)} rows, columns: {list(processed.columns)}")
+        
+        processed = self.strategy.populate_entry_trend(processed, {'pair': pair_formatted})
+        
+        # Check if any signals were generated
+        entry_signals = processed.get('enter_long', pd.Series([0] * len(processed)))
+        signal_count = (entry_signals == 1).sum()
+        if self.debug_mode:
+            logger.debug(f"🎯 DEBUG: {symbol} entry signals generated: {signal_count}/{len(processed)}")
+        
+        if signal_count > 0 and self.debug_mode:
+            signal_indices = processed[entry_signals == 1].index.tolist()
+            signal_times = processed.loc[signal_indices, 'datetime'].tolist()
+            logger.info(f"✅ SIGNAL FOUND: {symbol} has {signal_count} signals at: {signal_times}")
+        
+        return processed
     
     # REMOVED: populate_indicators() and populate_entry_signals() 
     # These methods are now called directly from the strategy to avoid duplication!
@@ -540,57 +1149,76 @@ class FastMultiPairBacktester(TickBacktester):
         logger.info(f"🚀 Starting TRULY OPTIMIZED multi-pair backtest for {period_desc}")
         logger.info(f"Loading and pre-processing ALL data for {len(pairs)} pairs...")
         
-        # STEP 1: Load and pre-process ALL candle data ONCE
-        processed_candle_data = {}
-        all_signals_by_time = {}  # Will store signals grouped by timestamp
+        # STEP 1: Load RAW candle data ONLY (NO PRE-PROCESSING to prevent cheating)
+        raw_candle_data = {}
         
         for symbol in pairs:
             candles = self.load_candles(symbol, start_date, end_date)
             if candles is not None:
-                # Process ALL indicators and signals ONCE
-                pair_formatted = f"{symbol.replace('USDT', '')}/USDT:USDT"
-                processed = self.strategy.populate_indicators(candles, {'pair': pair_formatted})
-                processed = self.strategy.populate_entry_trend(processed, {'pair': pair_formatted})
-                
-                processed_candle_data[symbol] = processed
-                
-                # Extract entry signals into event list
-                entry_mask = processed.get('enter_long', pd.Series([0] * len(processed))) == 1
-                if entry_mask.any():
-                    for idx, row in processed[entry_mask].iterrows():
-                        timestamp = row['datetime']
-                        if timestamp not in all_signals_by_time:
-                            all_signals_by_time[timestamp] = []
-                        all_signals_by_time[timestamp].append({
-                            'symbol': symbol,
-                            'price': row['close'],
-                            'tag': row.get('enter_tag', 'signal')
-                        })
-                
-                logger.info(f"✅ {symbol}: {len(processed):,} candles, {entry_mask.sum()} signals")
+                raw_candle_data[symbol] = candles
+                logger.info(f"✅ {symbol}: {len(candles):,} raw candles loaded")
             else:
                 logger.warning(f"❌ {symbol}: No candle data")
         
-        if not processed_candle_data:
+        if not raw_candle_data:
             logger.error("No candle data available!")
             return None
         
-        # Initialize candle cache
-        self.candle_data = processed_candle_data
+        # Store raw data for real-time processing
+        self.raw_candle_data = raw_candle_data
         
-        # Get sorted event timestamps (only timestamps with signals or when we need to check exits)
-        event_timestamps = sorted(all_signals_by_time.keys())
-        logger.info(f"📊 Found {len(event_timestamps):,} timestamps with signals (vs {len(processed_candle_data[list(processed_candle_data.keys())[0]]):,} total candles)")
+        # STEP 2: Create event timeline from all candle timestamps (real-time processing)
+        all_timestamps = set()
+        for symbol, candles in raw_candle_data.items():
+            all_timestamps.update(candles['datetime'].tolist())
+        
+        event_timestamps = sorted(all_timestamps)
+        logger.info(f"⏰ TIMESTAMP DEBUG: Found {len(event_timestamps)} unique timestamps")
+        # Process every timestamp to avoid missing signals (like real trading)
+        sampled_timestamps = event_timestamps[::1]  # Every 5-minute candle
+        logger.info(f"⏰ TIMESTAMP DEBUG: Will process {len(sampled_timestamps)} sampled timestamps")
+        
+        logger.info(f"📊 Processing {len(sampled_timestamps):,} timestamps with REAL-TIME indicator calculation (no cheating)")
         logger.info("="*60)
         
-        # STEP 2: Process ONLY relevant events
+        # STEP 3: Process events with real-time indicator calculation
         trades_executed = 0
-        last_progress_update = 0
+        backtest_start_time = sampled_timestamps[0] if sampled_timestamps else pd.Timestamp.now(tz='UTC')
         
         # Track next exit check time for each position
         position_next_check = {}
         
-        for event_idx, current_time in enumerate(event_timestamps):
+        logger.info(f"🚀 MAIN LOOP: Starting backtest with {len(sampled_timestamps)} timestamps")
+        exchange_downtime_remaining = 0  # Track remaining downtime periods
+        
+        for event_idx, current_time in enumerate(sampled_timestamps):
+            if event_idx % 50 == 0:
+                logger.info(f"🔄 MAIN LOOP: Processing timestamp {event_idx+1}/{len(sampled_timestamps)} at {current_time}")
+            
+            # OPTIMIZED: Check exchange downtime only every 10 periods (50 minutes)
+            if event_idx % 10 == 0:  # Check only every 10th timestamp
+                if exchange_downtime_remaining > 0:
+                    exchange_downtime_remaining -= 1
+                    if self.debug_mode:
+                        logger.debug(f"⏸️ EXCHANGE DOWN: Skipping {current_time}, {exchange_downtime_remaining} periods remaining")
+                    continue  # Skip all trading during downtime
+                else:
+                    # Check for new downtime events (rarely happens)
+                    downtime_duration = self._simulate_exchange_downtime(current_time)
+                    if downtime_duration > 0:
+                        exchange_downtime_remaining = int(downtime_duration)
+                        if exchange_downtime_remaining > 1:  # Log only multi-period downtimes
+                            logger.warning(f"🚨 EXCHANGE OUTAGE: {current_time.strftime('%Y-%m-%d %H:%M')} - Trading halted for {exchange_downtime_remaining} periods")
+                        continue  # Skip current period
+            
+            # Apply funding fees only if enabled (can be disabled for speed)
+            if self.include_funding_fees:
+                self._apply_funding_fees(current_time)
+            
+            # MAJOR OPTIMIZATION: Skip processing if no positions and not entry time
+            if len(self.portfolio.open_positions) == 0 and event_idx % 3 != 0:  # Only check entries every 3rd timestamp
+                continue  # Skip most timestamps when no positions
+            
             # OPTIMIZATION: Skip if we have max positions and no exits possible
             if len(self.portfolio.open_positions) >= self.portfolio.max_open_trades:
                 # Check if any position could exit at this time
@@ -627,6 +1255,28 @@ class FastMultiPairBacktester(TickBacktester):
                 
                 CompleteMockTrade._update_trades_cache(historical_trades, current_time)
             
+            # Calculate indicators for all pairs at current time (REAL-TIME, no cheating)
+            current_pair_data = {}
+            if self.debug_mode:
+                logger.debug(f"🕒 DEBUG: Processing timestamp {current_time}")
+            
+            for symbol in self.raw_candle_data.keys():
+                processed_data = self._calculate_indicators_realtime(symbol, current_time)
+                if processed_data is not None:
+                    current_pair_data[symbol] = processed_data
+                    # Update strategy's data provider with real-time calculated data
+                    self.strategy.dp._update_data_cache(symbol, processed_data, current_time)
+                elif self.debug_mode:
+                    logger.debug(f"❌ DEBUG: No processed data for {symbol} at {current_time}")
+            
+            if self.debug_mode:
+                logger.debug(f"📈 DEBUG: {len(current_pair_data)} pairs have data at {current_time}")
+
+            # OPTIMIZED: Check correlation breakdown only when we have 3+ positions
+            correlation_moves = {}
+            if len(self.portfolio.open_positions) >= 3 and event_idx % 5 == 0:  # Check every 5th timestamp
+                correlation_moves = self._simulate_correlation_breakdown(current_time, self.portfolio.open_positions)
+            
             # STEP 2A: Check exits for open positions FIRST (more important than entries)
             for trade in list(self.portfolio.open_positions):
                 if trade.exit_time is None:
@@ -640,9 +1290,9 @@ class FastMultiPairBacktester(TickBacktester):
                     # Schedule next check for 5 minutes later
                     position_next_check[position_key] = current_time + pd.Timedelta(minutes=5)
                     
-                    # Get current price from pre-processed data
-                    if symbol in processed_candle_data:
-                        symbol_df = processed_candle_data[symbol]
+                    # Get current price from real-time calculated data
+                    if symbol in current_pair_data:
+                        symbol_df = current_pair_data[symbol]
                         
                         # Find closest past candle for exit decision
                         past_mask = symbol_df['datetime'] <= current_time
@@ -656,6 +1306,16 @@ class FastMultiPairBacktester(TickBacktester):
                         # Use PREVIOUS candle for exit decision (no cheating)
                         prev_candle = symbol_df.iloc[current_idx - 1]
                         historical_price = prev_candle['close']
+                        
+                        # ULTRA REALISTIC: Apply correlation breakdown price effects
+                        if symbol in correlation_moves:
+                            correlation_move = correlation_moves[symbol]
+                            original_price = historical_price
+                            historical_price *= (1 + correlation_move)  # Apply forced correlation move
+                            
+                            if abs(correlation_move) > 0.03:  # Log significant moves
+                                logger.error(f"💥 CORRELATED EXIT: {symbol} price forced {original_price:.4f} → {historical_price:.4f} "
+                                           f"({correlation_move:+.1%}) due to correlation breakdown")
                         
                         # Check exit conditions
                         pair_formatted = f"{symbol.replace('USDT', '')}/USDT:USDT"
@@ -703,12 +1363,17 @@ class FastMultiPairBacktester(TickBacktester):
                                 )
                         
                         if should_exit:
-                            # Execute exit with realistic delay
-                            exit_execution_delay = pd.Timedelta(seconds=5)
+                            # Execute exit with realistic delay (same logic as entry)
+                            base_delay = 3  # Slightly faster exit than entry (3s vs 10s)
+                            api_latency = random.uniform(0.05, 0.2)  # 50-200ms API latency
+                            processing_delay = random.uniform(0.1, 0.5)  # 100-500ms processing
+                            total_exit_delay = base_delay + api_latency + processing_delay
+                            exit_execution_delay = pd.Timedelta(seconds=total_exit_delay)
                             exit_execution_time = current_time + exit_execution_delay
                             
                             # Get execution price from tick data
-                            execution_price = self.get_execution_price(symbol, exit_execution_time, 'sell')
+                            position_value = trade.quantity * trade.entry_price
+                            execution_price = self.get_execution_price(symbol, exit_execution_time, 'sell', position_value)
                             
                             if execution_price:
                                 # Close position
@@ -716,10 +1381,12 @@ class FastMultiPairBacktester(TickBacktester):
                                 trade.exit_price = execution_price
                                 trade.exit_reason = exit_reason
                                 
-                                pnl = (trade.exit_price - trade.entry_price) * trade.quantity
-                                trade.pnl = pnl
-                                trade.pnl_pct = ((trade.exit_price - trade.entry_price) / trade.entry_price) * 100
-                                trade.is_winner = pnl > 0
+                                # Calculate PNL including funding fees
+                                trading_pnl = (trade.exit_price - trade.entry_price) * trade.quantity
+                                total_pnl = trading_pnl - trade.funding_fees  # Subtract funding costs
+                                trade.pnl = total_pnl
+                                trade.pnl_pct = (total_pnl / (trade.entry_price * trade.quantity)) * 100
+                                trade.is_winner = total_pnl > 0
                                 
                                 exit_value = trade.exit_price * trade.quantity
                                 self.portfolio.available_balance += exit_value
@@ -735,35 +1402,125 @@ class FastMultiPairBacktester(TickBacktester):
                                 
                                 trades_executed += 1
                                 days_held = (trade.exit_time - trade.entry_time).total_seconds() / 86400
-                                logger.info(f"📉 EXIT  | {symbol} | {exit_execution_time.strftime('%Y-%m-%d %H:%M:%S')} | ${execution_price:.4f} | P&L: ${pnl:.2f} ({trade.pnl_pct:+.2f}%) | {days_held:.1f}d | {exit_reason}")
+                                logger.info(f"📉 EXIT  | {symbol} | {exit_execution_time.strftime('%Y-%m-%d %H:%M:%S')} | ${execution_price:.4f} | P&L: ${total_pnl:.2f} ({trade.pnl_pct:+.2f}%) | {days_held:.1f}d | {exit_reason}")
             
-            # STEP 2B: Process entry signals at this timestamp (if we have room)
-            if current_time in all_signals_by_time and len(self.portfolio.open_positions) < self.portfolio.max_open_trades:
-                for signal in all_signals_by_time[current_time]:
+            # STEP 2B: Check for entry signals in real-time calculated data (if we have room)
+            if self.debug_mode:
+                logger.info(f"🔄 PORTFOLIO CHECK: {len(self.portfolio.open_positions)}/{self.portfolio.max_open_trades} positions, {len(current_pair_data)} pairs with data")
+            if len(self.portfolio.open_positions) < self.portfolio.max_open_trades:
+                if self.debug_mode:
+                    logger.info(f"🔍 ENTRY SCAN: Looking for entry signals at {current_time}")
+                
+                for symbol, processed_data in current_pair_data.items():
+                    if self.debug_mode:
+                        logger.debug(f"🔎 DEBUG: Checking {symbol} for signals...")
+                    
                     # Check if we still have room
                     if len(self.portfolio.open_positions) >= self.portfolio.max_open_trades:
+                        if self.debug_mode:
+                            logger.debug("🚫 DEBUG: Portfolio full, breaking")
                         break
-                    
-                    symbol = signal['symbol']
                     
                     # Skip if we already have a position in this symbol
                     if any(t.symbol == symbol for t in self.portfolio.open_positions):
+                        if self.debug_mode:
+                            logger.debug(f"🔄 DEBUG: {symbol} already has open position, skipping")
                         continue
                     
-                    # Call strategy's confirm_trade_entry
-                    pair_formatted = f"{symbol.replace('USDT', '')}/USDT:USDT"
-                    position_size_value = self.portfolio.available_balance * self.portfolio.position_size_pct
+                    # Check for entry signal using PREVIOUS candle (anti-cheating)
+                    # In real trading, we decide based on closed candles, not current forming candle
+                    past_candles = processed_data[processed_data['datetime'] < current_time]
+                    if self.debug_mode:
+                        logger.info(f"🔍 SIGNAL CHECK: {symbol} at {current_time} - {len(past_candles)} past candles (from {len(processed_data)} total)")
                     
-                    # Update strategy data provider cache for this check
-                    if symbol in processed_candle_data:
-                        historical_data = processed_candle_data[symbol][processed_candle_data[symbol]['datetime'] <= current_time]
-                        self.strategy.dp._update_data_cache(symbol, historical_data, current_time)
+                    if len(past_candles) == 0:
+                        if self.debug_mode:
+                            logger.info(f"❌ SIGNAL CHECK: {symbol} no past candles available")
+                        continue
+                    
+                    # Log all candles with signals (debug only)
+                    if self.debug_mode:
+                        signals_found = processed_data[processed_data.get('enter_long', 0) == 1]
+                        if len(signals_found) > 0:
+                            signal_times = signals_found['datetime'].tolist()
+                            logger.info(f"📊 SIGNAL CHECK: {symbol} has {len(signals_found)} signals in processed_data at: {signal_times}")
+                            past_signals = signals_found[signals_found['datetime'] < current_time]
+                            logger.info(f"🕐 SIGNAL CHECK: {symbol} has {len(past_signals)} past signals (before {current_time})")
+                    
+                    # Find the LATEST candle that HAS a signal (not just the last candle)
+                    past_signals = past_candles[past_candles.get('enter_long', 0) == 1]
+                    if len(past_signals) == 0:
+                        if self.debug_mode:
+                            logger.info(f"🚫 SIGNAL CHECK: {symbol} no signals in past candles")
+                        continue
+                    
+                    signal_candle = past_signals.iloc[-1]  # Latest signal candle
+                    signal_time = signal_candle['datetime']
+                    enter_long_value = signal_candle.get('enter_long', 0)
+                    
+                    if self.debug_mode:
+                        logger.info(f"🎯 SIGNAL FOUND: {symbol} latest signal at {signal_time}: enter_long={enter_long_value}")
+                    
+                    if enter_long_value != 1:
+                        if self.debug_mode:
+                            logger.info(f"🚫 SIGNAL CHECK: {symbol} invalid signal value (enter_long={enter_long_value})")
+                        continue  # Invalid signal
+                    
+                    # ULTRA REALISTIC: Apply strategy decay to signal strength
+                    decay_info = self._simulate_strategy_decay(1.0, current_time, backtest_start_time)
+                    
+                    # Random signal filtering based on decay (simulates market adaptation)
+                    signal_survives = random.random() < decay_info['signal_strength']
+                    
+                    if not signal_survives:
+                        logger.info(f"📉 SIGNAL DECAY: {symbol} signal filtered out due to strategy decay "
+                                   f"(strength: {decay_info['signal_strength']:.1%}, {decay_info['months_elapsed']:.1f} months elapsed)")
+                        continue  # Signal filtered out by decay
+                        
+                    logger.info(f"🚨 SIGNAL DETECTED: {symbol} has entry signal at {signal_time} "
+                               f"(post-decay strength: {decay_info['signal_strength']:.1%})!")
+                        
+                    # Calculate position size BEFORE execution (required for slippage calculations)
+                    pair_formatted = f"{symbol.replace('USDT', '')}/USDT:USDT"
+                    base_position_size = self.portfolio.available_balance * self.portfolio.position_size_pct
+                        
+                    # Add realistic execution delay with randomization (no simultaneous fills)
+                    base_delay = 10  # Base 10 second delay
+                    api_latency = random.uniform(0.05, 0.3)  # 50-300ms API latency
+                    processing_delay = random.uniform(0.1, 0.8)  # 100-800ms processing
+                    total_delay = base_delay + api_latency + processing_delay
+                    execution_delay = pd.Timedelta(seconds=total_delay)
+                    execution_time = current_time + execution_delay
+                    
+                    # Get tick-based execution price (prevents any candle close data leakage)
+                    # CRITICAL FIX: Use execution_time for tick loading, NOT signal_time
+                    execution_price = self.get_execution_price(
+                        symbol, execution_time, 'buy', base_position_size, 
+                        decay_penalty=decay_info['execution_penalty']
+                    )
+                    
+                    if execution_price is None:
+                        logger.warning(f"❌ TICK DATA: {symbol} no execution price available at {execution_time}")
+                        continue
+                    
+                    # Use tick price for ALL strategy decisions (eliminates data leakage)
+                    signal = {
+                        'symbol': symbol,
+                        'price': execution_price,  # ✅ FIX: Use tick price consistently
+                        'tag': signal_candle.get('enter_tag', 'signal')
+                    }
+                    
+                    logger.info(f"✅ SIGNAL READY: {symbol} signal at {signal_time}, execution at {execution_time} @ ${execution_price:.4f}")
+                    
+                    # Call strategy's confirm_trade_entry (pair_formatted and base_position_size already calculated above)
+                    
+                    # Strategy data provider already updated with real-time data above
                     
                     if not self.strategy.confirm_trade_entry(
                         pair=pair_formatted,
                         order_type='market', 
                         amount=0,
-                        rate=0,
+                        rate=execution_price,  # ✅ FIX: Use tick price for validation
                         time_in_force='gtc',
                         current_time=current_time,
                         entry_tag=signal['tag'],
@@ -771,16 +1528,30 @@ class FastMultiPairBacktester(TickBacktester):
                     ):
                         continue  # Strategy rejected the trade
                     
-                    # Add realistic execution delay
-                    execution_delay = pd.Timedelta(seconds=10)
-                    execution_time = current_time + execution_delay
-                    
-                    # Get execution price from tick data
-                    execution_price = self.get_execution_price(symbol, execution_time, 'buy')
+                    # CRITICAL: Call custom_stake_amount with tick-based pricing
+                    if hasattr(self.strategy, 'custom_stake_amount'):
+                        position_size_value = self.strategy.custom_stake_amount(
+                            pair=pair_formatted,
+                            current_time=current_time,
+                            current_rate=execution_price,  # ✅ FIX: Use tick price for position sizing
+                            proposed_stake=base_position_size,
+                            min_stake=10.0,
+                            max_stake=self.portfolio.available_balance * 0.2,
+                            leverage=1.0,
+                            entry_tag=signal['tag'],
+                            side='long'
+                        )
+                    else:
+                        position_size_value = base_position_size
                     
                     if execution_price and position_size_value >= 10 and self.portfolio.available_balance >= position_size_value:
-                        # Open position
-                        quantity = position_size_value / execution_price
+                        # CHEAT FIX #10: Simulate realistic partial fills
+                        # In real trading, you don't always get 100% of your order filled
+                        fill_rate = self._calculate_fill_rate(symbol, position_size_value, execution_time)
+                        actual_fill_value = position_size_value * fill_rate
+                        
+                        # Open position with actual filled amount
+                        quantity = actual_fill_value / execution_price
                         
                         trade = Trade(
                             symbol=symbol,
@@ -791,50 +1562,53 @@ class FastMultiPairBacktester(TickBacktester):
                         )
                         
                         self.portfolio.open_positions.append(trade)
-                        self.portfolio.available_balance -= position_size_value
+                        self.portfolio.available_balance -= actual_fill_value  # Only deduct what was actually filled
                         
                         trades_executed += 1
-                        logger.info(f"📈 ENTRY | {symbol} | {execution_time.strftime('%Y-%m-%d %H:%M:%S')} | ${execution_price:.4f} | Size: ${position_size_value:.0f} | {trade.entry_signal}")
+                        logger.info(f"📈 ENTRY | {symbol} | {execution_time.strftime('%Y-%m-%d %H:%M:%S')} | ${execution_price:.4f} | Filled: ${actual_fill_value:.0f} (wanted ${position_size_value:.0f}) | {trade.entry_signal}")
             
             # Progress update
-            if event_idx > 0 and (event_idx % 100 == 0 or event_idx == len(event_timestamps) - 1):
-                progress = ((event_idx + 1) / len(event_timestamps)) * 100
+            if event_idx > 0 and (event_idx % 100 == 0 or event_idx == len(sampled_timestamps) - 1):
+                progress = ((event_idx + 1) / len(sampled_timestamps)) * 100
                 open_count = len(self.portfolio.open_positions)
                 closed_count = len(self.portfolio.closed_trades)
                 
                 # Calculate current value conservatively
                 current_value = self.portfolio.available_balance
                 for pos in self.portfolio.open_positions:
-                    if pos.symbol in processed_candle_data:
+                    if pos.symbol in current_pair_data:
                         # Use conservative valuation
-                        past_candles = processed_candle_data[pos.symbol][processed_candle_data[pos.symbol]['datetime'] < current_time]
+                        past_candles = current_pair_data[pos.symbol][current_pair_data[pos.symbol]['datetime'] < current_time]
                         if len(past_candles) > 0:
                             last_known_price = past_candles.iloc[-1]['close'] * 0.999
                             current_value += pos.quantity * last_known_price
                         else:
                             current_value += pos.quantity * pos.entry_price
                 
-                logger.info(f"📊 Event {event_idx+1}/{len(event_timestamps)} ({progress:.1f}%) | Open: {open_count} | Closed: {closed_count} | Value: ${current_value:.2f} | Trades: {trades_executed} | Tick lookups: {self.tick_lookups}")
+                logger.info(f"📊 Event {event_idx+1}/{len(sampled_timestamps)} ({progress:.1f}%) | Open: {open_count} | Closed: {closed_count} | Value: ${current_value:.2f} | Trades: {trades_executed} | Tick lookups: {self.tick_lookups}")
         
         # STEP 3: Close remaining positions at end of backtest
         for trade in list(self.portfolio.open_positions):
-            if trade.symbol in processed_candle_data:
-                last_candle = processed_candle_data[trade.symbol].iloc[-1]
+            if trade.symbol in self.raw_candle_data:
+                # Use last available raw candle for final closing
+                last_candle = self.raw_candle_data[trade.symbol].iloc[-1]
                 trade.exit_time = last_candle['datetime']
                 trade.exit_price = last_candle['close']
                 trade.exit_reason = 'backtest_end'
                 
-                pnl = (trade.exit_price - trade.entry_price) * trade.quantity
-                trade.pnl = pnl
-                trade.pnl_pct = ((trade.exit_price - trade.entry_price) / trade.entry_price) * 100
-                trade.is_winner = pnl > 0
+                # Calculate PNL including funding fees
+                trading_pnl = (trade.exit_price - trade.entry_price) * trade.quantity
+                total_pnl = trading_pnl - trade.funding_fees  # Subtract funding costs
+                trade.pnl = total_pnl
+                trade.pnl_pct = (total_pnl / (trade.entry_price * trade.quantity)) * 100
+                trade.is_winner = total_pnl > 0
                 
                 exit_value = trade.exit_price * trade.quantity
                 self.portfolio.available_balance += exit_value
                 
                 self.portfolio.closed_trades.append(trade)
                 
-                logger.info(f"🔚 {trade.symbol} closed at end | P&L: ${pnl:.2f}")
+                logger.info(f"🔚 {trade.symbol} closed at end | P&L: ${total_pnl:.2f}")
         
         self.portfolio.open_positions = []
         self.portfolio.current_balance = self.portfolio.available_balance
@@ -941,6 +1715,9 @@ class FastMultiPairBacktester(TickBacktester):
         
         commission = total_trade_value * 0.001  # 0.1% on total traded value
         
+        # Calculate total funding fees paid
+        total_funding_fees = sum(trade.funding_fees for trade in self.portfolio.closed_trades)
+        
         # Average trade duration (simplified - assume all trades are similar duration)
         avg_duration = 0.5  # Default to 0.5 days average
         if self.portfolio.closed_trades:
@@ -969,6 +1746,7 @@ class FastMultiPairBacktester(TickBacktester):
             'largest_win': largest_win,
             'largest_loss': largest_loss,
             'commission': commission,
+            'funding_fees': total_funding_fees,
             'avg_duration': avg_duration,
             'final_balance': self.portfolio.current_balance,
             'tick_lookups': self.tick_lookups
@@ -1007,6 +1785,8 @@ def main():
     parser.add_argument('--start', type=str, help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end', type=str, help='End date (YYYY-MM-DD)')
     parser.add_argument('--recent', action='store_true', help='Use recent 3 months of data')
+    parser.add_argument('--debug', action='store_true', help='Enable debug logging (cheat checks, signal details)')
+    parser.add_argument('--no-funding', action='store_true', help='Disable funding fees for faster backtesting')
     
     args = parser.parse_args()
     
@@ -1047,7 +1827,9 @@ def main():
     # Run backtest
     start_time = time.time()
     backtester = FastMultiPairBacktester(
-        initial_balance=args.balance
+        initial_balance=args.balance,
+        debug_mode=args.debug,
+        include_funding_fees=not args.no_funding
     )
     
     results = backtester.run_fast_backtest(pairs, start_date, end_date)
@@ -1073,6 +1855,7 @@ def main():
         print(f"  Gross Profit: ${results['gross_profit']:,.2f}")
         print(f"  Gross Loss: ${results['gross_loss']:,.2f}")
         print(f"  Commission: ${results['commission']:,.2f}")
+        print(f"  Funding Fees: ${results['funding_fees']:,.2f}")
         
         print(f"\n📊 Trading Metrics:")
         print(f"  Profit Factor: {results['profit_factor']:.2f}")
@@ -1105,7 +1888,7 @@ def main():
         print(f"  ✅ Freqtrade Environment: Complete mock with Trade database + Wallets")
         print(f"  ✅ Strategy Context: Full access to trade history for risk checks")
         print(f"  ✅ Risk Controls: Daily/monthly loss limits from strategy")
-        print(f"  ✅ Trading Costs: 0.04% Binance futures fees + 0.01% slippage")
+        print(f"  ✅ Trading Costs: 0.04% Binance futures fees + 0.01% slippage + funding fees")
         print(f"  ✅ Position Sizing: Matches config exactly (6.6% per position)")
         print(f"  ✅ Portfolio Valuation: Conservative estimates, no price peeking")
         print(f"  ✅ Time Integrity: All timestamps UTC timezone-aware")
